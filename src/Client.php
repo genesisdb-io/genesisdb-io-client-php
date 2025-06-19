@@ -100,6 +100,14 @@ class Client
 
         $requestBody = [
             'events' => array_map(function($event) {
+                if (array_key_exists('source', $event)) {
+                    return [
+                        'source' => $event['source'],
+                        'subject' => $event['subject'],
+                        'type' => $event['type'],
+                        'data' => $event['data']
+                    ];
+                }
                 return [
                     'subject' => $event['subject'],
                     'type' => $event['type'],
