@@ -35,16 +35,33 @@ class Client
 
     /**
      * @param string $subject
+     * @param string|null $lowerBound
+     * @param bool|null $includeLowerBoundEvent
+     * @param string|null $latestByEventType
      * @return CloudEvent[]
      * @throws GuzzleException
      */
-    public function streamEvents(string $subject): array
+    public function streamEvents(string $subject, ?string $lowerBound = null, ?bool $includeLowerBoundEvent = null, ?string $latestByEventType = null): array
     {
         $url = "{$this->apiUrl}/api/{$this->apiVersion}/stream";
 
+        $requestBody = ['subject' => $subject];
+
+        if ($lowerBound !== null) {
+            $requestBody['lowerBound'] = $lowerBound;
+        }
+
+        if ($includeLowerBoundEvent !== null) {
+            $requestBody['includeLowerBoundEvent'] = $includeLowerBoundEvent;
+        }
+
+        if ($latestByEventType !== null) {
+            $requestBody['latestByEventType'] = $latestByEventType;
+        }
+
         try {
             $response = $this->client->post($url, [
-                'json' => ['subject' => $subject],
+                'json' => $requestBody,
                 'headers' => [
                     'Accept' => 'application/x-ndjson',
                     'Content-Type' => 'application/json',
@@ -91,7 +108,8 @@ class Client
     }
 
     /**
-     * @param array $events Array of events with subject, type, and data
+     * @param array $events Array of events with subject, type, data, and optional options
+     * @param array|null $preconditions
      * @throws GuzzleException
      */
     public function commitEvents(array $events, ?array $preconditions = null): void
@@ -100,12 +118,19 @@ class Client
 
         $requestBody = [
             'events' => array_map(function($event) {
-                return [
+                $eventData = [
                     'source' => $event['source'],
                     'subject' => $event['subject'],
                     'type' => $event['type'],
                     'data' => $event['data']
                 ];
+
+                // Add options if present (for GDPR storeDataAsReference)
+                if (isset($event['options'])) {
+                    $eventData['options'] = $event['options'];
+                }
+
+                return $eventData;
             }, $events)
         ];
 
@@ -122,6 +147,28 @@ class Client
             ]);
         } catch (GuzzleException $e) {
             error_log("Error while committing events: " . $e->getMessage());
+            throw $e;
+        }
+    }
+
+    /**
+     * Erase data for GDPR compliance
+     * @param string $subject
+     * @throws GuzzleException
+     */
+    public function eraseData(string $subject): void
+    {
+        $url = "{$this->apiUrl}/api/{$this->apiVersion}/erase";
+
+        try {
+            $this->client->post($url, [
+                'json' => ['subject' => $subject],
+                'headers' => [
+                    'Content-Type' => 'application/json',
+                ]
+            ]);
+        } catch (GuzzleException $e) {
+            error_log("Error while erasing data: " . $e->getMessage());
             throw $e;
         }
     }
@@ -221,16 +268,33 @@ class Client
      * Observes events for a given subject in real-time
      *
      * @param string $subject The subject to observe events for
+     * @param string|null $lowerBound
+     * @param bool|null $includeLowerBoundEvent
+     * @param string|null $latestByEventType
      * @return \Generator Returns a generator that yields CloudEvent objects
      * @throws GuzzleException
      */
-    public function observeEvents(string $subject): \Generator
+    public function observeEvents(string $subject, ?string $lowerBound = null, ?bool $includeLowerBoundEvent = null, ?string $latestByEventType = null): \Generator
     {
         $url = "{$this->apiUrl}/api/{$this->apiVersion}/observe";
 
+        $requestBody = ['subject' => $subject];
+
+        if ($lowerBound !== null) {
+            $requestBody['lowerBound'] = $lowerBound;
+        }
+
+        if ($includeLowerBoundEvent !== null) {
+            $requestBody['includeLowerBoundEvent'] = $includeLowerBoundEvent;
+        }
+
+        if ($latestByEventType !== null) {
+            $requestBody['latestByEventType'] = $latestByEventType;
+        }
+
         try {
             $response = $this->client->post($url, [
-                'json' => ['subject' => $subject],
+                'json' => $requestBody,
                 'headers' => [
                     'Accept' => 'application/x-ndjson',
                     'Content-Type' => 'application/json',
