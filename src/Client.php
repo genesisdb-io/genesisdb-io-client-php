@@ -265,6 +265,53 @@ class Client
     }
 
     /**
+     * @param string $query The query string to execute
+     * @return array Array of query results
+     * @throws GuzzleException
+     */
+    public function queryEvents(string $query): array
+    {
+        $url = "{$this->apiUrl}/api/{$this->apiVersion}/q";
+
+        try {
+            $response = $this->client->post($url, [
+                'json' => ['query' => $query],
+                'headers' => [
+                    'Accept' => 'application/x-ndjson',
+                    'Content-Type' => 'application/json',
+                ]
+            ]);
+
+            $body = $response->getBody()->getContents();
+            if (empty(trim($body))) {
+                return [];
+            }
+
+            $results = [];
+            $lines = explode("\n", $body);
+
+            foreach ($lines as $line) {
+                if (empty(trim($line))) {
+                    continue;
+                }
+
+                try {
+                    $result = json_decode($line, true, 512, JSON_THROW_ON_ERROR);
+                    $results[] = $result;
+                } catch (\JsonException $e) {
+                    error_log("Error parsing result: " . $e->getMessage());
+                    error_log("Problem with JSON: " . $line);
+                }
+            }
+
+            return $results;
+        } catch (GuzzleException $e) {
+            error_log("Error while querying: " . $e->getMessage());
+            throw $e;
+        }
+    }
+
+    /**
      * Observes events for a given subject in real-time
      *
      * @param string $subject The subject to observe events for
