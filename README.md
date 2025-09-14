@@ -201,7 +201,12 @@ $preconditions = [
 $client->commitEvents($events, $preconditions);
 ```
 
+## License
+
+MIT
+
 ## Author
 
 * E-Mail: mail@genesisdb.io
 * URL: https://www.genesisdb.io
+* Docs: https://docs.genesisdb.io
