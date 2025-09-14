@@ -141,10 +141,14 @@ foreach ($client->observeEvents('/user/123', 'event-id-123', true) as $event) {
 }
 ```
 
-### Preconditions Example
+## Preconditions
+
+Preconditions allow you to enforce certain checks on the server before committing events. Genesis DB supports multiple precondition types:
+
+### isSubjectNew
+Ensures that a subject is new (has no existing events):
 
 ```php
-// Example with isSubjectNew precondition
 $events = [
     [
         'source' => 'io.genesisdb.test',
@@ -162,6 +166,34 @@ $preconditions = [
         'type' => 'isSubjectNew',
         'payload' => [
             'subject' => '/bar/1caaf703-cdbe-449e-880c-8309acfafa46/foo'
+        ]
+    ]
+];
+
+$client->commitEvents($events, $preconditions);
+```
+
+### isQueryResultTrue
+Evaluates a query and ensures the result is truthy:
+
+```php
+$events = [
+    [
+        'source' => 'io.genesisdb.app',
+        'subject' => '/event/conf-2024',
+        'type' => 'io.genesisdb.app.registration-added',
+        'data' => [
+            'attendeeName' => 'Alice',
+            'eventId' => 'conf-2024'
+        ]
+    ]
+];
+
+$preconditions = [
+    [
+        'type' => 'isQueryResultTrue',
+        'payload' => [
+            'query' => "FROM e IN events WHERE e.data.eventId == 'conf-2024' PROJECT INTO COUNT() < 500"
         ]
     ]
 ];
