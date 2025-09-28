@@ -7,9 +7,18 @@
     "guzzlehttp/guzzle": "^7.0",
     "cloudevents/sdk-php": "^1.0"
   },
+  "require-dev": {
+    "phpunit/phpunit": "^10.0",
+    "guzzlehttp/psr7": "^2.0"
+  },
   "autoload": {
     "psr-4": {
       "GenesisDB\\GenesisDB\\": "src/"
+    }
+  },
+  "autoload-dev": {
+    "psr-4": {
+      "GenesisDB\\GenesisDB\\Tests\\": "tests/"
     }
   },
   "config": {
@@ -17,5 +26,8 @@
     "allow-plugins": {
       "php-http/discovery": true
     }
+  },
+  "scripts": {
+    "test": "phpunit"
   }
 }
