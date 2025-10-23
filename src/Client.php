@@ -27,7 +27,7 @@ class Client
 
         $this->client = new HttpClient([
             'headers' => [
-                'User-Agent' => 'inoovum-eventstore-sdk-php',
+                'User-Agent' => 'genesisdb-sdk',
                 'Authorization' => 'Bearer ' . $this->authToken,
             ]
         ]);
