@@ -1,6 +1,6 @@
 {
   "name": "genesisdb/client-sdk",
-  "description": "PHP SDK for Genesis DB",
+  "description": "PHP SDK for GenesisDB",
   "type": "library",
   "require": {
     "php": ">=8.1",
