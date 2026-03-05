@@ -34,29 +34,24 @@ class Client
     }
 
     /**
-     * @param string $subject
-     * @param string|null $lowerBound
-     * @param bool|null $includeLowerBoundEvent
-     * @param string|null $latestByEventType
+     * Stream events for a given subject
+     *
+     * @param string $subject The subject to stream events for
+     * @param StreamOptions|null $options Optional streaming options (lowerBound, upperBound, latestByEventType, etc.)
      * @return CloudEvent[]
      * @throws GuzzleException
      */
-    public function streamEvents(string $subject, ?string $lowerBound = null, ?bool $includeLowerBoundEvent = null, ?string $latestByEventType = null): array
+    public function streamEvents(string $subject, ?StreamOptions $options = null): array
     {
         $url = "{$this->apiUrl}/api/{$this->apiVersion}/stream";
 
         $requestBody = ['subject' => $subject];
 
-        if ($lowerBound !== null) {
-            $requestBody['lowerBound'] = $lowerBound;
-        }
-
-        if ($includeLowerBoundEvent !== null) {
-            $requestBody['includeLowerBoundEvent'] = $includeLowerBoundEvent;
-        }
-
-        if ($latestByEventType !== null) {
-            $requestBody['latestByEventType'] = $latestByEventType;
+        if ($options !== null) {
+            $optionsArray = $options->toArray();
+            if (!empty($optionsArray)) {
+                $requestBody['options'] = $optionsArray;
+            }
         }
 
         try {
@@ -108,8 +103,11 @@ class Client
     }
 
     /**
-     * @param array $events Array of events with subject, type, data, and optional options
-     * @param array|null $preconditions
+     * Commits events to GenesisDB
+     *
+     * @param CommitEvent[] $events Array of CommitEvent objects to commit
+     * @param Precondition[]|null $preconditions Optional array of preconditions to check before committing.
+     *   If a precondition fails, the server returns HTTP 412 (Precondition Failed).
      * @throws GuzzleException
      */
     public function commitEvents(array $events, ?array $preconditions = null): void
@@ -117,25 +115,15 @@ class Client
         $url = "{$this->apiUrl}/api/{$this->apiVersion}/commit";
 
         $requestBody = [
-            'events' => array_map(function($event) {
-                $eventData = [
-                    'source' => $event['source'],
-                    'subject' => $event['subject'],
-                    'type' => $event['type'],
-                    'data' => $event['data']
-                ];
-
-                // Add options if present (for GDPR storeDataAsReference)
-                if (isset($event['options'])) {
-                    $eventData['options'] = $event['options'];
-                }
-
-                return $eventData;
+            'events' => array_map(function (CommitEvent $event) {
+                return $event->toArray();
             }, $events)
         ];
 
-        if ($preconditions !== null) {
-            $requestBody['preconditions'] = $preconditions;
+        if ($preconditions !== null && count($preconditions) > 0) {
+            $requestBody['preconditions'] = array_map(function (Precondition $precondition) {
+                return $precondition->toArray();
+            }, $preconditions);
         }
 
         try {
@@ -153,6 +141,7 @@ class Client
 
     /**
      * Erase data for GDPR compliance
+     *
      * @param string $subject
      * @throws GuzzleException
      */
@@ -174,6 +163,8 @@ class Client
     }
 
     /**
+     * Run audit to check event consistency
+     *
      * @return string
      * @throws GuzzleException
      */
@@ -196,6 +187,8 @@ class Client
     }
 
     /**
+     * Health check
+     *
      * @return string
      * @throws GuzzleException
      */
@@ -218,6 +211,8 @@ class Client
     }
 
     /**
+     * Execute a GDBQL query
+     *
      * @param string $query The query string to execute
      * @return array Array of query results
      * @throws GuzzleException
@@ -265,78 +260,36 @@ class Client
     }
 
     /**
+     * Query events using the same functionality as the q method
+     *
      * @param string $query The query string to execute
      * @return array Array of query results
      * @throws GuzzleException
      */
     public function queryEvents(string $query): array
     {
-        $url = "{$this->apiUrl}/api/{$this->apiVersion}/q";
-
-        try {
-            $response = $this->client->post($url, [
-                'json' => ['query' => $query],
-                'headers' => [
-                    'Accept' => 'application/x-ndjson',
-                    'Content-Type' => 'application/json',
-                ]
-            ]);
-
-            $body = $response->getBody()->getContents();
-            if (empty(trim($body))) {
-                return [];
-            }
-
-            $results = [];
-            $lines = explode("\n", $body);
-
-            foreach ($lines as $line) {
-                if (empty(trim($line))) {
-                    continue;
-                }
-
-                try {
-                    $result = json_decode($line, true, 512, JSON_THROW_ON_ERROR);
-                    $results[] = $result;
-                } catch (\JsonException $e) {
-                    error_log("Error parsing result: " . $e->getMessage());
-                    error_log("Problem with JSON: " . $line);
-                }
-            }
-
-            return $results;
-        } catch (GuzzleException $e) {
-            error_log("Error while querying: " . $e->getMessage());
-            throw $e;
-        }
+        return $this->q($query);
     }
 
     /**
      * Observes events for a given subject in real-time
      *
      * @param string $subject The subject to observe events for
-     * @param string|null $lowerBound
-     * @param bool|null $includeLowerBoundEvent
-     * @param string|null $latestByEventType
+     * @param StreamOptions|null $options Optional streaming options (lowerBound, upperBound, latestByEventType, etc.)
      * @return \Generator Returns a generator that yields CloudEvent objects
      * @throws GuzzleException
      */
-    public function observeEvents(string $subject, ?string $lowerBound = null, ?bool $includeLowerBoundEvent = null, ?string $latestByEventType = null): \Generator
+    public function observeEvents(string $subject, ?StreamOptions $options = null): \Generator
     {
         $url = "{$this->apiUrl}/api/{$this->apiVersion}/observe";
 
         $requestBody = ['subject' => $subject];
 
-        if ($lowerBound !== null) {
-            $requestBody['lowerBound'] = $lowerBound;
-        }
-
-        if ($includeLowerBoundEvent !== null) {
-            $requestBody['includeLowerBoundEvent'] = $includeLowerBoundEvent;
-        }
-
-        if ($latestByEventType !== null) {
-            $requestBody['latestByEventType'] = $latestByEventType;
+        if ($options !== null) {
+            $optionsArray = $options->toArray();
+            if (!empty($optionsArray)) {
+                $requestBody['options'] = $optionsArray;
+            }
         }
 
         try {
@@ -368,6 +321,11 @@ class Client
                         $jsonStr = str_starts_with($line, 'data: ') ? substr($line, 6) : $line;
                         $json = json_decode($jsonStr, true, 512, JSON_THROW_ON_ERROR);
 
+                        // Skip heartbeat messages
+                        if (isset($json['payload']) && $json['payload'] === '' && count($json) === 1) {
+                            continue;
+                        }
+
                         $event = new CloudEvent(
                             $json['id'],
                             $json['source'],
@@ -390,5 +348,4 @@ class Client
             throw $e;
         }
     }
-
 }
