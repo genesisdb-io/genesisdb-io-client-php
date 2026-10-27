@@ -1,351 +1,318 @@
 <?php
 
-namespace GenesisDB\GenesisDB;
+declare(strict_types=1);
 
-use CloudEvents\V1\CloudEvent;
+namespace GenesisDB;
+
 use GuzzleHttp\Client as HttpClient;
+use GuzzleHttp\ClientInterface;
 use GuzzleHttp\Exception\GuzzleException;
+use GuzzleHttp\RequestOptions;
+use Psr\Http\Message\ResponseInterface;
+use Psr\Http\Message\StreamInterface;
 
-class Client
+/**
+ * Client for GenesisDB.
+ *
+ *     $db = new Client(url: 'http://localhost:8080', token: getenv('GENESISDB_AUTH_TOKEN'));
+ *     $db->commit([new NewEvent('app', '/customer/1', 'customer.created', ['name' => 'Bruce'])]);
+ *     $events = $db->fetch('/customer');
+ *
+ * `url` and `token` fall back to GENESISDB_URL and GENESISDB_AUTH_TOKEN. Every method throws
+ * GenesisDBException (or a subclass) on a non-2xx answer.
+ */
+final class Client
 {
-    private string $apiUrl;
-    private string $apiVersion;
-    private string $authToken;
-    private HttpClient $client;
+    public const USER_AGENT = 'genesisdb-php/2';
+    private const HEARTBEAT = '{"payload":""}';
 
-    public function __construct(string $apiUrl, string $apiVersion, string $authToken)
-    {
-        $this->apiUrl = $apiUrl;
-        $this->apiVersion = $apiVersion;
-        $this->authToken = $authToken;
-
-        if ($this->apiUrl === '' || $this->apiVersion === '' || $this->authToken === '') {
-            throw new \RuntimeException(
-                'Missing required variables: apiUrl, apiVersion, authToken'
-            );
-        }
-
-        $this->client = new HttpClient([
-            'headers' => [
-                'User-Agent' => 'genesisdb-sdk',
-                'Authorization' => 'Bearer ' . $this->authToken,
-            ]
-        ]);
-    }
+    private readonly string $url;
+    private readonly string $token;
+    private readonly ClientInterface $http;
 
     /**
-     * Stream events for a given subject
-     *
-     * @param string $subject The subject to stream events for
-     * @param StreamOptions|null $options Optional streaming options (lowerBound, upperBound, latestByEventType, etc.)
-     * @return CloudEvent[]
-     * @throws GuzzleException
+     * @param string|null $url base URL, for example http://localhost:8080. Falls back to GENESISDB_URL
+     * @param string|null $token bearer token. Falls back to GENESISDB_AUTH_TOKEN
+     * @param float $timeout seconds, for non-streaming calls. 0 disables. Subscriptions never time out
+     * @param ClientInterface|null $http bring your own Guzzle client (proxies, TLS, handler stack)
      */
-    public function streamEvents(string $subject, ?StreamOptions $options = null): array
+    public function __construct(?string $url = null, ?string $token = null, float $timeout = 30.0, ?ClientInterface $http = null)
     {
-        $url = "{$this->apiUrl}/api/{$this->apiVersion}/stream";
-
-        $requestBody = ['subject' => $subject];
-
-        if ($options !== null) {
-            $optionsArray = $options->toArray();
-            if (!empty($optionsArray)) {
-                $requestBody['options'] = $optionsArray;
-            }
+        $url = $url ?: (getenv('GENESISDB_URL') ?: null);
+        $token = $token ?: (getenv('GENESISDB_AUTH_TOKEN') ?: null);
+        if ($url === null) {
+            throw new \InvalidArgumentException('GenesisDB URL missing: pass url or set GENESISDB_URL');
         }
-
-        try {
-            $response = $this->client->post($url, [
-                'json' => $requestBody,
-                'headers' => [
-                    'Accept' => 'application/x-ndjson',
-                    'Content-Type' => 'application/json',
-                ]
-            ]);
-
-            $body = $response->getBody()->getContents();
-            if (empty(trim($body))) {
-                return [];
-            }
-
-            $events = [];
-            $lines = explode("\n", $body);
-
-            foreach ($lines as $line) {
-                if (empty(trim($line))) {
-                    continue;
-                }
-
-                try {
-                    $eventData = json_decode($line, true, 512, JSON_THROW_ON_ERROR);
-                    $event = new CloudEvent(
-                        $eventData['id'],
-                        $eventData['source'],
-                        $eventData['type'],
-                        $eventData['data'],
-                        'application/json',
-                        null,
-                        $eventData['subject'],
-                        new \DateTimeImmutable($eventData['time']),
-                    );
-                    $events[] = $event;
-                } catch (\JsonException $e) {
-                    error_log("Error parsing event: " . $e->getMessage());
-                    error_log("Problem with JSON: " . $line);
-                }
-            }
-
-            return $events;
-        } catch (GuzzleException $e) {
-            error_log("Error while streaming events: " . $e->getMessage());
-            throw $e;
+        if ($token === null) {
+            throw new \InvalidArgumentException('GenesisDB token missing: pass token or set GENESISDB_AUTH_TOKEN');
         }
+        $this->url = rtrim($url, '/');
+        $this->token = $token;
+        $this->http = $http ?? new HttpClient([RequestOptions::TIMEOUT => $timeout, RequestOptions::HTTP_ERRORS => false]);
     }
 
-    /**
-     * Commits events to GenesisDB
-     *
-     * @param CommitEvent[] $events Array of CommitEvent objects to commit
-     * @param Precondition[]|null $preconditions Optional array of preconditions to check before committing.
-     *   If a precondition fails, the server returns HTTP 412 (Precondition Failed).
-     * @throws GuzzleException
-     */
-    public function commitEvents(array $events, ?array $preconditions = null): void
-    {
-        $url = "{$this->apiUrl}/api/{$this->apiVersion}/commit";
+    // Health and status
 
-        $requestBody = [
-            'events' => array_map(function (CommitEvent $event) {
-                return $event->toArray();
-            }, $events)
-        ];
-
-        if ($preconditions !== null && count($preconditions) > 0) {
-            $requestBody['preconditions'] = array_map(function (Precondition $precondition) {
-                return $precondition->toArray();
-            }, $preconditions);
-        }
-
-        try {
-            $this->client->post($url, [
-                'json' => $requestBody,
-                'headers' => [
-                    'Content-Type' => 'application/json',
-                ]
-            ]);
-        } catch (GuzzleException $e) {
-            error_log("Error while committing events: " . $e->getMessage());
-            throw $e;
-        }
-    }
-
-    /**
-     * Erase data for GDPR compliance
-     *
-     * @param string $subject
-     * @throws GuzzleException
-     */
-    public function eraseData(string $subject): void
-    {
-        $url = "{$this->apiUrl}/api/{$this->apiVersion}/erase";
-
-        try {
-            $this->client->post($url, [
-                'json' => ['subject' => $subject],
-                'headers' => [
-                    'Content-Type' => 'application/json',
-                ]
-            ]);
-        } catch (GuzzleException $e) {
-            error_log("Error while erasing data: " . $e->getMessage());
-            throw $e;
-        }
-    }
-
-    /**
-     * Run audit to check event consistency
-     *
-     * @return string
-     * @throws GuzzleException
-     */
-    public function audit(): string
-    {
-        $url = "{$this->apiUrl}/api/{$this->apiVersion}/status/audit";
-
-        try {
-            $response = $this->client->get($url, [
-                'headers' => [
-                    'Content-Type' => 'text/plain',
-                ]
-            ]);
-
-            return $response->getBody()->getContents();
-        } catch (GuzzleException $e) {
-            error_log("Error while running audit: " . $e->getMessage());
-            throw $e;
-        }
-    }
-
-    /**
-     * Health check
-     *
-     * @return string
-     * @throws GuzzleException
-     */
+    /** Liveness check. Needs no token on the server. Returns "Pong". */
     public function ping(): string
     {
-        $url = "{$this->apiUrl}/api/{$this->apiVersion}/status/ping";
+        return $this->text('ping', 'GET', '/ping');
+    }
 
-        try {
-            $response = $this->client->get($url, [
-                'headers' => [
-                    'Content-Type' => 'text/plain',
-                ]
-            ]);
+    /** Engine version, host, event counts, storage format and readiness. */
+    public function status(): Status
+    {
+        return Status::fromArray($this->json('status', 'GET', '/api/v1/status'));
+    }
 
-            return $response->getBody()->getContents();
-        } catch (GuzzleException $e) {
-            error_log("Error while pinging: " . $e->getMessage());
-            throw $e;
+    /** Verify the hash chain of the whole store. Administrator token. Returns the audit text. */
+    public function audit(): string
+    {
+        return $this->text('audit', 'GET', '/api/v1/status/audit');
+    }
+
+    // Events
+
+    /**
+     * Commit events atomically after checking the preconditions. Returns the stored events.
+     * A failed precondition throws PreconditionFailedException and writes nothing.
+     *
+     * @param list<NewEvent> $events
+     * @param list<Precondition> $preconditions
+     * @return list<Event>
+     */
+    public function commit(array $events, array $preconditions = []): array
+    {
+        if ($events === []) {
+            throw new \InvalidArgumentException('commit requires at least one event');
         }
+        $body = ['events' => array_values($events)];
+        if ($preconditions !== []) {
+            $body['preconditions'] = array_values($preconditions);
+        }
+        return array_map(Event::fromArray(...), $this->ndjson('commit', 'POST', '/api/v1/commit', $body));
     }
 
     /**
-     * Execute a GDBQL query
+     * Fetch the events of a subject and all of its descendants, in commit order.
      *
-     * @param string $query The query string to execute
-     * @return array Array of query results
-     * @throws GuzzleException
+     * @return list<Event>
      */
-    public function q(string $query): array
+    public function fetch(string $subject, ?FetchOptions $options = null): array
     {
-        $url = "{$this->apiUrl}/api/{$this->apiVersion}/q";
+        return array_map(Event::fromArray(...), $this->ndjson('fetch', 'POST', '/api/v1/fetch', self::fetchBody($subject, $options)));
+    }
 
+    /**
+     * Subscribe to a subject and its descendants. Yields the history first, then new events as they are committed.
+     * Iterates until the caller stops (break out of the loop) or the server ends the stream. A stream the server
+     * ends with an error throws GenesisDBException.
+     *
+     * @param float|null $interval poll interval in seconds. Null uses the server default of one second
+     * @return \Generator<int, Event>
+     */
+    public function subscribe(string $subject, ?float $interval = null, ?FetchOptions $options = null): \Generator
+    {
+        $body = self::fetchBody($subject, $options);
+        if ($interval !== null) {
+            $body['interval'] = $interval;
+        }
+        $response = $this->send('subscribe', 'POST', '/api/v1/subscribe', $body, [RequestOptions::STREAM => true, RequestOptions::TIMEOUT => 0, RequestOptions::READ_TIMEOUT => 0]);
+        $stream = $response->getBody();
+        if ($response->getStatusCode() !== 200) {
+            throw GenesisDBException::forResponse('subscribe', $response->getStatusCode(), (string) $stream);
+        }
         try {
-            $response = $this->client->post($url, [
-                'json' => ['query' => $query],
-                'headers' => [
-                    'Accept' => 'application/x-ndjson',
-                    'Content-Type' => 'application/json',
-                ]
-            ]);
-
-            $body = $response->getBody()->getContents();
-            if (empty(trim($body))) {
-                return [];
-            }
-
-            $results = [];
-            $lines = explode("\n", $body);
-
-            foreach ($lines as $line) {
-                if (empty(trim($line))) {
+            $eventName = '';
+            foreach (self::lines($stream) as $line) {
+                if (str_starts_with($line, 'event: ')) {
+                    $eventName = trim(substr($line, 7));
                     continue;
                 }
-
-                try {
-                    $result = json_decode($line, true, 512, JSON_THROW_ON_ERROR);
-                    $results[] = $result;
-                } catch (\JsonException $e) {
-                    error_log("Error parsing result: " . $e->getMessage());
-                    error_log("Problem with JSON: " . $line);
+                if (!str_starts_with($line, 'data: ')) {
+                    $eventName = '';
+                    continue;
                 }
+                $payload = substr($line, 6);
+                if ($eventName === 'error') {
+                    $parsed = json_decode($payload, true);
+                    throw new GenesisDBException('subscribe ended', 200, is_array($parsed) && isset($parsed['error']) ? (string) $parsed['error'] : $payload);
+                }
+                $eventName = '';
+                if (trim($payload) === self::HEARTBEAT) {
+                    continue;
+                }
+                yield Event::fromArray(self::decode('subscribe', $payload));
             }
-
-            return $results;
-        } catch (GuzzleException $e) {
-            error_log("Error while querying: " . $e->getMessage());
-            throw $e;
+        } finally {
+            $stream->close();
         }
     }
 
     /**
-     * Query events using the same functionality as the q method
+     * Run a GDBQL query. Returns the result rows, or a single-element list for a bare aggregate.
      *
-     * @param string $query The query string to execute
-     * @return array Array of query results
-     * @throws GuzzleException
+     * @return list<mixed>
      */
-    public function queryEvents(string $query): array
+    public function query(string $query): array
     {
-        return $this->q($query);
+        return $this->ndjson('query', 'POST', '/api/v1/query', ['query' => $query]);
     }
 
     /**
-     * Observes events for a given subject in real-time
+     * Distinct top level subjects, sorted.
      *
-     * @param string $subject The subject to observe events for
-     * @param StreamOptions|null $options Optional streaming options (lowerBound, upperBound, latestByEventType, etc.)
-     * @return \Generator Returns a generator that yields CloudEvent objects
-     * @throws GuzzleException
+     * @return list<string>
      */
-    public function observeEvents(string $subject, ?StreamOptions $options = null): \Generator
+    public function subjects(): array
     {
-        $url = "{$this->apiUrl}/api/{$this->apiVersion}/observe";
+        return array_map(fn (array $row) => (string) $row['subject'], $this->ndjson('subjects', 'GET', '/api/v1/subjects'));
+    }
 
-        $requestBody = ['subject' => $subject];
+    /**
+     * Distinct event types, sorted.
+     *
+     * @return list<string>
+     */
+    public function types(): array
+    {
+        return array_map(fn (array $row) => (string) $row['type'], $this->ndjson('types', 'GET', '/api/v1/types'));
+    }
 
-        if ($options !== null) {
-            $optionsArray = $options->toArray();
-            if (!empty($optionsArray)) {
-                $requestBody['options'] = $optionsArray;
-            }
+    // Schemas
+
+    /**
+     * Register a schema for an event type. Throws ConflictException when the type already has one. Administrator token.
+     *
+     * @param array<string, mixed> $schema
+     */
+    public function registerSchema(string $eventType, array $schema): void
+    {
+        $this->send('register_schema', 'POST', '/api/v1/schemas', ['type' => $eventType, 'schema' => $schema === [] ? new \stdClass() : $schema]);
+    }
+
+    /**
+     * Every registered schema.
+     *
+     * @return list<RegisteredSchema>
+     */
+    public function schemas(): array
+    {
+        return array_map(fn (array $row) => new RegisteredSchema((string) $row['type'], (array) $row['schema']), $this->ndjson('schemas', 'GET', '/api/v1/schemas'));
+    }
+
+    // Administration
+
+    /**
+     * Erase every reference payload below a subject. Inline event data is immutable and stays. Throws
+     * NotFoundException when the subject has no events, UnprocessableException when it has no reference payloads.
+     * Administrator token. Returns the server's confirmation text.
+     */
+    public function erase(string $subject): string
+    {
+        return $this->text('erase', 'POST', '/api/v1/erase', ['subject' => $subject]);
+    }
+
+    // Transport
+
+    /** @return array<string, mixed> */
+    private static function fetchBody(string $subject, ?FetchOptions $options): array
+    {
+        $body = ['subject' => $subject];
+        if ($options !== null && !$options->isEmpty()) {
+            $body['options'] = $options;
         }
+        return $body;
+    }
 
+    /**
+     * @param array<string, mixed>|null $body
+     * @param array<string, mixed> $extra
+     */
+    private function send(string $operation, string $method, string $path, ?array $body = null, array $extra = []): ResponseInterface
+    {
+        $options = $extra + [
+            RequestOptions::HEADERS => ['Authorization' => 'Bearer ' . $this->token, 'User-Agent' => self::USER_AGENT],
+            RequestOptions::HTTP_ERRORS => false,
+        ];
+        if ($body !== null) {
+            $options[RequestOptions::JSON] = $body;
+        }
         try {
-            $response = $this->client->post($url, [
-                'json' => $requestBody,
-                'headers' => [
-                    'Accept' => 'application/x-ndjson',
-                    'Content-Type' => 'application/json',
-                ],
-                'stream' => true
-            ]);
-
-            $body = $response->getBody();
-            $buffer = '';
-
-            while (!$body->eof()) {
-                $chunk = $body->read(1024);
-                $buffer .= $chunk;
-
-                while (($newlinePos = strpos($buffer, "\n")) !== false) {
-                    $line = substr($buffer, 0, $newlinePos);
-                    $buffer = substr($buffer, $newlinePos + 1);
-
-                    if (empty(trim($line))) {
-                        continue;
-                    }
-
-                    try {
-                        $jsonStr = str_starts_with($line, 'data: ') ? substr($line, 6) : $line;
-                        $json = json_decode($jsonStr, true, 512, JSON_THROW_ON_ERROR);
-
-                        // Skip heartbeat messages
-                        if (isset($json['payload']) && $json['payload'] === '' && count($json) === 1) {
-                            continue;
-                        }
-
-                        $event = new CloudEvent(
-                            $json['id'],
-                            $json['source'],
-                            $json['type'],
-                            $json['data'],
-                            'application/json',
-                            null,
-                            $json['subject'],
-                            new \DateTimeImmutable($json['time']),
-                        );
-                        yield $event;
-                    } catch (\JsonException $e) {
-                        error_log("Error parsing event: " . $e->getMessage());
-                        error_log("Problem with JSON: " . $line);
-                    }
-                }
-            }
+            $response = $this->http->request($method, $this->url . $path, $options);
         } catch (GuzzleException $e) {
-            error_log("Error while observing events: " . $e->getMessage());
-            throw $e;
+            throw new GenesisDBException($operation, 0, $e->getMessage(), $e);
+        }
+        $status = $response->getStatusCode();
+        if (($status < 200 || $status > 299) && !($extra[RequestOptions::STREAM] ?? false)) {
+            throw GenesisDBException::forResponse($operation, $status, (string) $response->getBody());
+        }
+        return $response;
+    }
+
+    /** @param array<string, mixed>|null $body */
+    private function text(string $operation, string $method, string $path, ?array $body = null): string
+    {
+        return (string) $this->send($operation, $method, $path, $body)->getBody();
+    }
+
+    /**
+     * @param array<string, mixed>|null $body
+     * @return array<mixed>
+     */
+    private function json(string $operation, string $method, string $path, ?array $body = null): array
+    {
+        return self::decode($operation, $this->text($operation, $method, $path, $body));
+    }
+
+    /**
+     * @param array<string, mixed>|null $body
+     * @return list<mixed>
+     */
+    private function ndjson(string $operation, string $method, string $path, ?array $body = null): array
+    {
+        $rows = [];
+        foreach (explode("\n", $this->text($operation, $method, $path, $body)) as $line) {
+            if (trim($line) === '') {
+                continue;
+            }
+            $rows[] = json_decode($line, true, 512, JSON_THROW_ON_ERROR);
+        }
+        return $rows;
+    }
+
+    /** @return array<mixed> */
+    private static function decode(string $operation, string $text): array
+    {
+        try {
+            $decoded = json_decode($text, true, 512, JSON_THROW_ON_ERROR);
+        } catch (\JsonException $e) {
+            throw new GenesisDBException($operation, 0, 'invalid JSON in response: ' . $e->getMessage(), $e);
+        }
+        return is_array($decoded) ? $decoded : ['value' => $decoded];
+    }
+
+    /** @return \Generator<int, string> */
+    private static function lines(StreamInterface $stream): \Generator
+    {
+        $buffer = '';
+        while (!$stream->eof()) {
+            $chunk = $stream->read(8192);
+            if ($chunk === '') {
+                if ($stream->eof()) {
+                    break;
+                }
+                usleep(10_000);
+                continue;
+            }
+            $buffer .= $chunk;
+            while (($newline = strpos($buffer, "\n")) !== false) {
+                yield rtrim(substr($buffer, 0, $newline), "\r");
+                $buffer = substr($buffer, $newline + 1);
+            }
+        }
+        if ($buffer !== '') {
+            yield rtrim($buffer, "\r");
         }
     }
 }

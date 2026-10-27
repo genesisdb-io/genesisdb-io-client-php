@@ -1,81 +1,40 @@
 <?php
 
-namespace GenesisDB\GenesisDB;
+declare(strict_types=1);
 
-/**
- * A precondition that must hold true before a commit is accepted.
- *
- * Use one of the factory methods for strongly-typed variants, or create
- * a generic precondition for forward compatibility with future server releases.
- */
-class Precondition
+namespace GenesisDB;
+
+/** A precondition that is checked atomically with the commit. Build one with the static factories. */
+final class Precondition implements \JsonSerializable
 {
     /**
-     * @param string $type The precondition type
-     * @param array<string, mixed> $payload The precondition payload
+     * @param array<string, string> $payload
      */
-    public function __construct(
-        public readonly string $type,
-        public readonly array $payload,
-    ) {
+    private function __construct(public readonly string $type, public readonly array $payload)
+    {
     }
 
-    /**
-     * Ensures that no events exist yet for the given subject
-     *
-     * @param string $subject
-     * @return self
-     */
+    /** Holds when neither the subject nor a descendant has events. */
     public static function isSubjectNew(string $subject): self
     {
         return new self('isSubjectNew', ['subject' => $subject]);
     }
 
-    /**
-     * Ensures that at least one event exists for the given subject
-     *
-     * @param string $subject
-     * @return self
-     */
+    /** Holds when the subject or a descendant has events. */
     public static function isSubjectExisting(string $subject): self
     {
         return new self('isSubjectExisting', ['subject' => $subject]);
     }
 
-    /**
-     * Evaluates a GDBQL query and ensures the result is truthy
-     *
-     * @param string $query
-     * @return self
-     */
+    /** Holds when the GDBQL query result is true. */
     public static function isQueryResultTrue(string $query): self
     {
         return new self('isQueryResultTrue', ['query' => $query]);
     }
 
-    /**
-     * Escape-hatch for any precondition type that is not yet covered by
-     * the SDK types (forward-compatible with future server releases).
-     *
-     * @param string $type
-     * @param array<string, mixed> $payload
-     * @return self
-     */
-    public static function generic(string $type, array $payload): self
+    /** @return array<string, mixed> */
+    public function jsonSerialize(): array
     {
-        return new self($type, $payload);
-    }
-
-    /**
-     * Convert to array for JSON serialization
-     *
-     * @return array{type: string, payload: array<string, mixed>}
-     */
-    public function toArray(): array
-    {
-        return [
-            'type' => $this->type,
-            'payload' => $this->payload,
-        ];
+        return ['type' => $this->type, 'payload' => $this->payload];
     }
 }

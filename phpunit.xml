@@ -1,11 +1,15 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-         xsi:noNamespaceSchemaLocation="https://schema.phpunit.de/10.0/phpunit.xsd"
+         xsi:noNamespaceSchemaLocation="https://schema.phpunit.de/10.5/phpunit.xsd"
          bootstrap="vendor/autoload.php"
-         colors="true">
+         colors="true"
+         failOnWarning="true">
     <testsuites>
-        <testsuite name="GenesisDB SDK Tests">
-            <directory>tests</directory>
+        <testsuite name="unit">
+            <file>tests/ClientTest.php</file>
+        </testsuite>
+        <testsuite name="integration">
+            <file>tests/IntegrationTest.php</file>
         </testsuite>
     </testsuites>
     <source>

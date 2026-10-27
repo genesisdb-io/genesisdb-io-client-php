@@ -1,387 +1,179 @@
-# GenesisDB PHP SDK
+# GenesisDB client for PHP
 
-This is the official PHP SDK for GenesisDB, an awesome and production ready event store database system for building event-driven apps.
+The official client for [GenesisDB](https://www.genesisdb.io), the open source event sourcing database. PHP 8.2+, built on Guzzle, typed value objects and exceptions.
 
-## GenesisDB Advantages
+> **Version 2.0.0 targets GenesisDB 2.0 and is not compatible with GenesisDB 1.x servers or with the 1.x client API.** Routes, configuration, type names and method signatures have changed. Keep a 1.x client for a 1.x server.
+>
+> Existing 1.x clients keep working against a GenesisDB 2.0 server through deprecated route aliases, so the server can be upgraded first and the clients at your own pace. New 2.0 features (stored events returned by commit, upper bounds, schemas, typed errors) need this 2.0.0 client.
 
-* Incredibly fast when reading, fast when writing 🚀
-* Easy backup creation and recovery
-* [CloudEvents](https://cloudevents.io/) compatible
-* GDPR-ready
-* Easily accessible via the HTTP interface
-* Auditable. Guarantee database consistency
-* Logging and metrics for Prometheus
-* SQL like query language called GenesisDB Query Language (GDBQL)
-* ...
-
-## Installation
-
-```
+```bash
 composer require genesisdb/client-sdk
 ```
 
-## Configuration
-
-### Basic Setup
+## Quick start
 
 ```php
-use GenesisDB\GenesisDB\Client;
+use GenesisDB\Client;
+use GenesisDB\NewEvent;
 
-$client = new Client(
-    apiUrl: 'http://localhost:8080',
-    apiVersion: 'v1',
-    authToken: '<secret>'
-);
-```
+$db = new Client(url: 'http://localhost:8080', token: getenv('GENESISDB_AUTH_TOKEN'));
 
-## Streaming Events
-
-### Basic Event Streaming
-
-```php
-// Stream all events for a subject
-$events = $client->streamEvents('/customer');
-```
-
-### Stream Events from Lower Bound
-
-```php
-use GenesisDB\GenesisDB\StreamOptions;
-
-$events = $client->streamEvents('/', new StreamOptions(
-    lowerBound: '2d6d4141-6107-4fb2-905f-445730f4f2a9',
-    includeLowerBoundEvent: true
-));
-```
-
-### Stream Events with Upper Bound
-
-```php
-$events = $client->streamEvents('/', new StreamOptions(
-    upperBound: '9f3e4141-7208-4fb2-905f-445730f4f3b1',
-    includeUpperBoundEvent: false
-));
-```
-
-### Stream Events with Both Lower and Upper Bounds
-
-```php
-$events = $client->streamEvents('/', new StreamOptions(
-    lowerBound: '2d6d4141-6107-4fb2-905f-445730f4f2a9',
-    includeLowerBoundEvent: true,
-    upperBound: '9f3e4141-7208-4fb2-905f-445730f4f3b1',
-    includeUpperBoundEvent: false
-));
-```
-
-### Stream Latest Events by Event Type
-
-```php
-$events = $client->streamEvents('/', new StreamOptions(
-    latestByEventType: 'io.genesisdb.app.customer-updated'
-));
-```
-
-This feature allows you to stream only the latest event of a specific type for each subject. Useful for getting the current state of entities.
-
-## Committing Events
-
-### Basic Event Committing
-
-```php
-use GenesisDB\GenesisDB\CommitEvent;
-
-$client->commitEvents([
-    new CommitEvent(
-        source: 'io.genesisdb.app',
-        subject: '/customer',
-        type: 'io.genesisdb.app.customer-added',
-        data: [
-            'firstName' => 'Bruce',
-            'lastName' => 'Wayne',
-            'emailAddress' => 'bruce.wayne@enterprise.wayne'
-        ]
-    ),
-    new CommitEvent(
-        source: 'io.genesisdb.app',
-        subject: '/customer',
-        type: 'io.genesisdb.app.customer-added',
-        data: [
-            'firstName' => 'Alfred',
-            'lastName' => 'Pennyworth',
-            'emailAddress' => 'alfred.pennyworth@enterprise.wayne'
-        ]
-    ),
-    new CommitEvent(
-        source: 'io.genesisdb.store',
-        subject: '/article',
-        type: 'io.genesisdb.store.article-added',
-        data: [
-            'name' => 'Tumbler',
-            'color' => 'black',
-            'price' => 2990000.00
-        ]
-    ),
-    new CommitEvent(
-        source: 'io.genesisdb.app',
-        subject: '/customer/fed2902d-0135-460d-8605-263a06308448',
-        type: 'io.genesisdb.app.customer-personaldata-changed',
-        data: [
-            'firstName' => 'Angus',
-            'lastName' => 'MacGyver',
-            'emailAddress' => 'angus.macgyer@phoenix.foundation'
-        ]
-    )
+$db->commit([
+    new NewEvent('io.example.shop', '/customer/42', 'io.example.shop.customer-registered', ['name' => 'Bruce Wayne']),
 ]);
+
+$events = $db->fetch('/customer/42');
 ```
+
+`url` and `token` fall back to `GENESISDB_URL` and `GENESISDB_AUTH_TOKEN`, so `new Client()` works in an environment that sets both.
+
+## Events
+
+```php
+use GenesisDB\FetchOptions;
+
+// Commit a batch atomically. The server assigns ID, time and hashes and returns the stored events.
+$stored = $db->commit([
+    new NewEvent('io.example.shop', '/order/1', 'io.example.shop.order-placed', ['total' => 99.5]),
+    new NewEvent('io.example.shop', '/order/1/item/1', 'io.example.shop.item-added', ['sku' => 'A1', 'qty' => 2]),
+]);
+$stored[0]->id;    // "3f2c..."
+$stored[0]->hash;  // "a9b1..."
+$stored[0]->time;  // DateTimeImmutable
+$stored[0]->data;  // ['total' => 99.5]
+
+// A subject with one segment gets a generated ID appended.
+$db->commit([new NewEvent('io.example.shop', '/customer', 'io.example.shop.customer-registered', ['name' => 'Selina'])]);
+
+// Fetch a subject with all descendants, in commit order.
+$all = $db->fetch('/order/1');
+
+// Resume after a known event, or stop at one.
+$since = $db->fetch('/order', new FetchOptions(lowerBound: $lastSeenId, includeLowerBoundEvent: false));
+$until = $db->fetch('/order', new FetchOptions(upperBound: $someId, includeUpperBoundEvent: true));
+
+// Only the newest event of a type below the subject.
+$latest = $db->fetch('/order/1', new FetchOptions(latestByEventType: 'io.example.shop.order-placed'));
+```
+
+`data` accepts an associative array, a `JsonSerializable` or an object. An empty array is sent as `{}`.
 
 ## Preconditions
 
-Preconditions allow you to enforce certain checks on the server before committing events. GenesisDB supports multiple precondition types:
-
-### isSubjectNew
-Ensures that a subject is new (has no existing events):
+Preconditions are checked atomically with the commit. A failed precondition throws `PreconditionFailedException` and writes nothing.
 
 ```php
-use GenesisDB\GenesisDB\Precondition;
+use GenesisDB\Precondition;
+use GenesisDB\PreconditionFailedException;
 
-$client->commitEvents([
-    new CommitEvent(
-        source: 'io.genesisdb.app',
-        subject: '/user/456',
-        type: 'io.genesisdb.app.user-created',
-        data: [
-            'firstName' => 'John',
-            'lastName' => 'Doe',
-            'email' => 'john.doe@example.com'
-        ]
-    )
-], [
-    Precondition::isSubjectNew('/user/456')
-]);
-```
-
-### isSubjectExisting
-Ensures that events exist for the specified subject:
-
-```php
-$client->commitEvents([
-    new CommitEvent(
-        source: 'io.genesisdb.app',
-        subject: '/user/456',
-        type: 'io.genesisdb.app.user-updated',
-        data: [
-            'firstName' => 'John',
-            'lastName' => 'Doe',
-            'email' => 'john.doe@example.com'
-        ]
-    )
-], [
-    Precondition::isSubjectExisting('/user/456')
-]);
-```
-
-### isQueryResultTrue
-Evaluates a query and ensures the result is truthy. Supports the full GDBQL feature set including complex WHERE clauses, aggregations, and calculated fields.
-
-**Basic uniqueness check:**
-```php
-$client->commitEvents([
-    new CommitEvent(
-        source: 'io.genesisdb.app',
-        subject: '/user/456',
-        type: 'io.genesisdb.app.user-created',
-        data: [
-            'firstName' => 'John',
-            'lastName' => 'Doe',
-            'email' => 'john.doe@example.com'
-        ]
-    )
-], [
-    Precondition::isQueryResultTrue(
-        "STREAM e FROM events WHERE e.data.email == 'john.doe@example.com' MAP COUNT() == 0"
-    )
-]);
-```
-
-**Business rule enforcement (transaction limits):**
-```php
-$client->commitEvents([
-    new CommitEvent(
-        source: 'io.genesisdb.banking',
-        subject: '/user/123/transactions',
-        type: 'io.genesisdb.banking.transaction-processed',
-        data: [
-            'amount' => 500.00,
-            'currency' => 'EUR'
-        ]
-    )
-], [
-    Precondition::isQueryResultTrue(
-        "STREAM e FROM events WHERE e.subject UNDER '/user/123' AND e.type == 'transaction-processed' AND e.time >= '2024-01-01T00:00:00Z' MAP SUM(e.data.amount) + 500 <= 10000"
-    )
-]);
-```
-
-**Complex validation with aggregations:**
-```php
-$client->commitEvents([
-    new CommitEvent(
-        source: 'io.genesisdb.events',
-        subject: '/conference/2024/registrations',
-        type: 'io.genesisdb.events.registration-created',
-        data: [
-            'attendeeId' => 'att-789',
-            'ticketType' => 'premium'
-        ]
-    )
-], [
-    Precondition::isQueryResultTrue(
-        "STREAM e FROM events WHERE e.subject UNDER '/conference/2024/registrations' AND e.type == 'registration-created' GROUP BY e.data.ticketType HAVING e.data.ticketType == 'premium' MAP COUNT() < 50"
-    )
-]);
-```
-
-**Generic precondition (forward-compatible with future server releases):**
-```php
-$client->commitEvents([
-    new CommitEvent(
-        source: 'io.genesisdb.app',
-        subject: '/test',
-        type: 'io.genesisdb.app.test-created',
-        data: ['key' => 'value']
-    )
-], [
-    Precondition::generic('someCustomFuturePrecondition', ['foo' => 'bar', 'baz' => 123])
-]);
-```
-
-**Supported GDBQL Features in Preconditions:**
-- WHERE conditions with AND/OR/IN/BETWEEN operators
-- Hierarchical subject queries (UNDER, DESCENDANTS)
-- Aggregation functions (COUNT, SUM, AVG, MIN, MAX)
-- GROUP BY with HAVING clauses
-- ORDER BY and LIMIT clauses
-- Calculated fields and expressions
-- Nested field access (e.data.address.city)
-- String concatenation and arithmetic operations
-
-If a precondition fails, the commit returns HTTP 412 (Precondition Failed) with details about which condition failed.
-
-## GDPR Compliance
-
-### Store Data as Reference
-
-```php
-use GenesisDB\GenesisDB\CommitEventOptions;
-
-$client->commitEvents([
-    new CommitEvent(
-        source: 'io.genesisdb.app',
-        subject: '/user/456',
-        type: 'io.genesisdb.app.user-created',
-        data: [
-            'firstName' => 'John',
-            'lastName' => 'Doe',
-            'email' => 'john.doe@example.com'
+try {
+    $db->commit(
+        [new NewEvent('io.example.shop', '/customer/42', 'io.example.shop.customer-registered', ['email' => 'bruce@example.com'])],
+        [
+            Precondition::isSubjectNew('/customer/42'),
+            Precondition::isQueryResultTrue("STREAM e FROM events WHERE e.data.email == 'bruce@example.com' MAP COUNT() == 0"),
         ],
-        options: new CommitEventOptions(storeDataAsReference: true)
-    )
-]);
-```
-
-### Delete Referenced Data
-
-```php
-$client->eraseData('/user/456');
-```
-
-## Observing Events
-
-### Basic Event Observation
-
-```php
-foreach ($client->observeEvents('/customer') as $event) {
-    echo "Received event: " . $event->getType() . "\n";
-    echo "Data: " . json_encode($event->getData()) . "\n";
+    );
+} catch (PreconditionFailedException $e) {
+    echo $e->preconditionType, ': ', $e->reason; // "isSubjectNew: subject /customer/42 already has events"
 }
 ```
 
-### Observe Events from Lower Bound (Message Queue)
+Factories: `isSubjectNew`, `isSubjectExisting`, `isQueryResultTrue`.
+
+## Subscriptions
+
+`subscribe` is a generator over Server-Sent Events. It yields the existing history first, then new events as they are committed, and runs until you `break` out of the loop.
 
 ```php
-foreach ($client->observeEvents('/customer', new StreamOptions(
-    lowerBound: '2d6d4141-6107-4fb2-905f-445730f4f2a9',
-    includeLowerBoundEvent: true
-)) as $event) {
-    echo "Received event: " . $event->getType() . "\n";
+foreach ($db->subscribe('/order', interval: 0.5) as $event) {
+    echo $event->type, ' ', json_encode($event->data), PHP_EOL;
+    if ($shouldStop) {
+        break;
+    }
 }
 ```
 
-### Observe Events with Upper Bound (Message Queue)
+`interval` is the poll interval in seconds (default 1). The bound options of `fetch` work here as well (`options: new FetchOptions(lowerBound: ...)`), so a consumer that persists the last processed event ID resumes where it left off. A stream the server ends with an error throws `GenesisDBException`.
+
+## Queries
+
+[GDBQL](https://github.com/genesisdb-io/genesisdb/blob/main/docs/gdbql.md) runs on the server. Results come back as rows, a bare aggregate as a single-element list.
 
 ```php
-foreach ($client->observeEvents('/customer', new StreamOptions(
-    upperBound: '9f3e4141-7208-4fb2-905f-445730f4f3b1',
-    includeUpperBoundEvent: false
-)) as $event) {
-    echo "Received event: " . $event->getType() . "\n";
-}
-```
+$rows = $db->query("STREAM e FROM events WHERE e.subject UNDER '/customer' MAP { name: e.data.name, total: e.data.total }");
 
-### Observe Events with Both Bounds (Message Queue)
+[$count] = $db->query("STREAM e FROM events WHERE e.type == 'io.example.shop.order-placed' MAP COUNT()");
 
-```php
-foreach ($client->observeEvents('/customer', new StreamOptions(
-    lowerBound: '2d6d4141-6107-4fb2-905f-445730f4f2a9',
-    includeLowerBoundEvent: true,
-    upperBound: '9f3e4141-7208-4fb2-905f-445730f4f3b1',
-    includeUpperBoundEvent: false
-)) as $event) {
-    echo "Received event: " . $event->getType() . "\n";
-}
-```
-
-### Observe Latest Events by Event Type (Message Queue)
-
-```php
-foreach ($client->observeEvents('/customer', new StreamOptions(
-    latestByEventType: 'io.genesisdb.app.customer-updated'
-)) as $event) {
-    echo "Received latest event: " . $event->getType() . "\n";
-}
-```
-
-## Querying Events
-
-```php
-$results = $client->queryEvents(
-    'STREAM e FROM events WHERE e.type == "io.genesisdb.app.customer-added" ORDER BY e.time DESC LIMIT 20 MAP { subject: e.subject, firstName: e.data.firstName }'
+$byCategory = $db->query(
+    "STREAM e FROM events WHERE e.type == 'io.example.shop.item-added' GROUP BY e.data.category MAP { category: e.data.category, items: COUNT(), revenue: SUM(e.data.total) }"
 );
-
-foreach ($results as $result) {
-    echo "Result: " . json_encode($result) . "\n";
-}
 ```
 
-## Health Checks
+## GDPR: reference payloads and erasure
+
+Store a payload as reference data and it can be erased later. The event, its hash and the chain stay intact, the payload becomes `{}`.
 
 ```php
-// Check API status
-$pingResponse = $client->ping();
-echo "Ping response: " . $pingResponse . "\n";
+$db->commit([
+    (new NewEvent('io.example.shop', '/customer/42', 'io.example.shop.customer-registered', ['name' => 'Bruce', 'email' => 'bruce@example.com']))->asReference(),
+]);
 
-// Run audit to check event consistency
-$auditResponse = $client->audit();
-echo "Audit response: " . $auditResponse . "\n";
+$db->erase('/customer/42'); // administrator token
+```
+
+Inline payloads are immutable. `erase` on a subject without reference payloads throws `UnprocessableException` (422).
+
+## Schemas
+
+```php
+$db->registerSchema('io.example.shop.order-placed', [
+    'type' => 'object',
+    'properties' => ['total' => ['type' => 'number'], 'currency' => ['type' => 'string']],
+    'required' => ['total'],
+]);
+
+$schemas = $db->schemas();
+```
+
+Commits of that type are validated. A violation throws `GenesisDBException` with status 400.
+
+## Catalog, status, administration
+
+```php
+$db->subjects();          // ["/customer", "/order"]
+$db->types();             // ["io.example.shop.customer-registered", ...]
+$db->status();            // version, event counts, storage format, readiness, raw document
+$db->ping();              // "Pong", no token required
+
+$db->audit();             // "Audit passed. All 1234 events integrity checks succeeded."
+```
+
+Audit, erase and schema registration need the administrator token. Everything else works with a reader token (`GENESISDB_READ_TOKEN`), commit additionally with a writer token.
+
+## Errors
+
+Every non-2xx answer throws `GenesisDBException` with public readonly `status`, `body` and `operation`. Subclasses: `PreconditionFailedException` (412, with `preconditionType` and `reason`), `AuthenticationException` (401, 403), `NotFoundException` (404), `ConflictException` (409), `UnprocessableException` (422), `NotReadyException` (503). Transport failures throw `GenesisDBException` with status 0 and the Guzzle exception as previous.
+
+## Configuration
+
+```php
+new Client(
+    url: 'http://localhost:8080',     // or GENESISDB_URL
+    token: '...',                     // or GENESISDB_AUTH_TOKEN
+    timeout: 30.0,                    // seconds, for non-streaming calls, 0 disables
+    http: new GuzzleHttp\Client(...), // optional, bring your own Guzzle client (proxies, TLS, handler stack)
+);
+```
+
+## Development
+
+```bash
+composer install
+vendor/bin/phpunit --testsuite unit                                                       # against Guzzle's MockHandler
+GENESISDB_URL=http://localhost:8080 GENESISDB_AUTH_TOKEN=... vendor/bin/phpunit           # also runs IntegrationTest against a running GenesisDB
 ```
 
 ## License
 
 MIT
-
-## Author
-
-* E-Mail: mail@genesisdb.io
-* URL: https://www.genesisdb.io
-* Docs: https://docs.genesisdb.io

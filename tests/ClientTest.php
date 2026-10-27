@@ -1,703 +1,253 @@
 <?php
 
-namespace GenesisDB\GenesisDB\Tests;
+declare(strict_types=1);
 
-use CloudEvents\V1\CloudEvent;
-use GenesisDB\GenesisDB\Client;
-use GenesisDB\GenesisDB\CommitEvent;
-use GenesisDB\GenesisDB\CommitEventOptions;
-use GenesisDB\GenesisDB\Precondition;
-use GenesisDB\GenesisDB\StreamOptions;
+namespace GenesisDB\Tests;
+
+use GenesisDB\AuthenticationException;
+use GenesisDB\Client;
+use GenesisDB\ConflictException;
+use GenesisDB\FetchOptions;
+use GenesisDB\GenesisDBException;
+use GenesisDB\NewEvent;
+use GenesisDB\NotFoundException;
+use GenesisDB\NotReadyException;
+use GenesisDB\Precondition;
+use GenesisDB\PreconditionFailedException;
+use GenesisDB\UnprocessableException;
 use GuzzleHttp\Client as HttpClient;
 use GuzzleHttp\Handler\MockHandler;
 use GuzzleHttp\HandlerStack;
+use GuzzleHttp\Middleware;
 use GuzzleHttp\Psr7\Response;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
+use Psr\Http\Message\RequestInterface;
 
-class ClientTest extends TestCase
+/** Unit tests against Guzzle's MockHandler. See IntegrationTest for the live tests. */
+final class ClientTest extends TestCase
 {
-    private Client $client;
-    private MockHandler $mockHandler;
+    private const STORED = '{"source":"app","subject":"/customer/1","type":"customer.created","specversion":"1.0","id":"0199c0e0-0000-7000-8000-000000000001","time":"2026-10-24T10:00:00.123456789Z","datacontenttype":"application/json","predecessorhash":"0000000000000000000000000000000000000000000000000000000000000000","data":{"name":"Bruce"},"hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}';
+
+    private MockHandler $mock;
+    /** @var list<array{request: RequestInterface}> */
+    private array $history = [];
+    private Client $db;
 
     protected function setUp(): void
     {
-        $this->mockHandler = new MockHandler();
-        $handlerStack = HandlerStack::create($this->mockHandler);
-
-        $this->client = new Client('https://api.example.com', 'v1', 'test-token');
-
-        // Use reflection to replace the HTTP client with our mock
-        $reflection = new \ReflectionClass($this->client);
-        $clientProperty = $reflection->getProperty('client');
-        $clientProperty->setAccessible(true);
-        $clientProperty->setValue($this->client, new HttpClient(['handler' => $handlerStack]));
+        $this->mock = new MockHandler();
+        $stack = HandlerStack::create($this->mock);
+        $stack->push(Middleware::history($this->history));
+        $this->db = new Client(url: 'http://db.test/', token: 'secret', http: new HttpClient(['handler' => $stack]));
     }
 
-    public function testConstructorWithValidParameters(): void
+    private function respond(int $status, string $body): void
     {
-        $client = new Client('https://api.example.com', 'v1', 'test-token');
-        $this->assertInstanceOf(Client::class, $client);
+        $this->mock->append(new Response($status, [], $body));
     }
 
-    public function testConstructorThrowsExceptionWithEmptyApiUrl(): void
+    private function lastRequest(): RequestInterface
     {
-        $this->expectException(\RuntimeException::class);
-        $this->expectExceptionMessage('Missing required variables: apiUrl, apiVersion, authToken');
-
-        new Client('', 'v1', 'test-token');
+        return $this->history[count($this->history) - 1]['request'];
     }
 
-    public function testConstructorThrowsExceptionWithEmptyApiVersion(): void
+    /** @return array<string, mixed> */
+    private function lastBody(): array
     {
-        $this->expectException(\RuntimeException::class);
-        $this->expectExceptionMessage('Missing required variables: apiUrl, apiVersion, authToken');
-
-        new Client('https://api.example.com', '', 'test-token');
+        return json_decode((string) $this->lastRequest()->getBody(), true, 512, JSON_THROW_ON_ERROR);
     }
 
-    public function testConstructorThrowsExceptionWithEmptyAuthToken(): void
+    private static function event(string $subject = '/customer/1'): NewEvent
     {
-        $this->expectException(\RuntimeException::class);
-        $this->expectExceptionMessage('Missing required variables: apiUrl, apiVersion, authToken');
-
-        new Client('https://api.example.com', 'v1', '');
+        return new NewEvent('app', $subject, 'customer.created', ['name' => 'Bruce']);
     }
 
-    public function testStreamEventsReturnsEmptyArrayForEmptyResponse(): void
+    public function testConfigRequiresUrlAndToken(): void
     {
-        $this->mockHandler->append(
-            new Response(200, ['Content-Type' => 'application/x-ndjson'], '')
-        );
-
-        $events = $this->client->streamEvents('test-subject');
-        $this->assertEmpty($events);
+        if (getenv('GENESISDB_URL') && getenv('GENESISDB_AUTH_TOKEN')) {
+            $this->markTestSkipped('environment provides configuration');
+        }
+        $this->expectException(\InvalidArgumentException::class);
+        new Client(token: 't');
     }
 
-    public function testStreamEventsReturnsParsedCloudEvents(): void
+    public function testPingSendsHeaders(): void
     {
-        $eventJson = json_encode([
-            'id' => 'event-1',
-            'source' => 'test-source',
-            'type' => 'test.event',
-            'data' => ['key' => 'value'],
-            'subject' => 'test-subject',
-            'time' => '2023-01-01T00:00:00Z'
-        ]);
-
-        $this->mockHandler->append(
-            new Response(200, ['Content-Type' => 'application/x-ndjson'], $eventJson)
-        );
-
-        $events = $this->client->streamEvents('test-subject');
-
-        $this->assertCount(1, $events);
-        $this->assertInstanceOf(CloudEvent::class, $events[0]);
-        $this->assertEquals('event-1', $events[0]->getId());
-        $this->assertEquals('test-source', $events[0]->getSource());
-        $this->assertEquals('test.event', $events[0]->getType());
+        $this->respond(200, 'Pong');
+        self::assertSame('Pong', $this->db->ping());
+        $request = $this->lastRequest();
+        self::assertSame('http://db.test/ping', (string) $request->getUri());
+        self::assertSame('Bearer secret', $request->getHeaderLine('Authorization'));
+        self::assertSame('genesisdb-php/2', $request->getHeaderLine('User-Agent'));
     }
 
-    public function testStreamEventsWithOptions(): void
+    public function testCommitSendsBodyAndParsesNdjson(): void
     {
-        $this->mockHandler->append(
-            new Response(200, ['Content-Type' => 'application/x-ndjson'], '')
-        );
-
-        $this->client->streamEvents(
-            'test-subject',
-            new StreamOptions(
-                lowerBound: 'lower-bound-id',
-                includeLowerBoundEvent: true,
-                latestByEventType: 'latest-event-type'
-            )
-        );
-
-        $request = $this->mockHandler->getLastRequest();
-        $requestBody = json_decode($request->getBody()->getContents(), true);
-
-        $this->assertEquals('test-subject', $requestBody['subject']);
-        $this->assertEquals('lower-bound-id', $requestBody['options']['lowerBound']);
-        $this->assertTrue($requestBody['options']['includeLowerBoundEvent']);
-        $this->assertEquals('latest-event-type', $requestBody['options']['latestByEventType']);
+        $this->respond(200, self::STORED . "\n");
+        $events = $this->db->commit([self::event()], [Precondition::isSubjectNew('/customer/1')]);
+        self::assertSame('/api/v1/commit', $this->lastRequest()->getUri()->getPath());
+        self::assertSame([
+            'events' => [['source' => 'app', 'subject' => '/customer/1', 'type' => 'customer.created', 'data' => ['name' => 'Bruce']]],
+            'preconditions' => [['type' => 'isSubjectNew', 'payload' => ['subject' => '/customer/1']]],
+        ], $this->lastBody());
+        self::assertCount(1, $events);
+        self::assertSame('0199c0e0-0000-7000-8000-000000000001', $events[0]->id);
+        self::assertSame(['name' => 'Bruce'], $events[0]->data);
+        self::assertSame(str_repeat('a', 64), $events[0]->hash);
+        self::assertSame('2026-10-24T10:00:00.123456+00:00', $events[0]->time->format('Y-m-d\TH:i:s.uP'));
     }
 
-    public function testStreamEventsWithUpperBound(): void
+    public function testCommitOmitsEmptyPreconditionsAndSerialisesReferenceOption(): void
     {
-        $this->mockHandler->append(
-            new Response(200, ['Content-Type' => 'application/x-ndjson'], '')
-        );
-
-        $this->client->streamEvents(
-            'test-subject',
-            new StreamOptions(
-                upperBound: 'upper-bound-id',
-                includeUpperBoundEvent: false
-            )
-        );
-
-        $request = $this->mockHandler->getLastRequest();
-        $requestBody = json_decode($request->getBody()->getContents(), true);
-
-        $this->assertEquals('test-subject', $requestBody['subject']);
-        $this->assertEquals('upper-bound-id', $requestBody['options']['upperBound']);
-        $this->assertFalse($requestBody['options']['includeUpperBoundEvent']);
+        $this->respond(200, self::STORED . "\n");
+        $this->db->commit([self::event()->asReference()]);
+        $body = $this->lastBody();
+        self::assertArrayNotHasKey('preconditions', $body);
+        self::assertSame(['storeDataAsReference' => true], $body['events'][0]['options']);
     }
 
-    public function testStreamEventsWithBothBounds(): void
+    public function testCommitEncodesEmptyDataAsObject(): void
     {
-        $this->mockHandler->append(
-            new Response(200, ['Content-Type' => 'application/x-ndjson'], '')
-        );
-
-        $this->client->streamEvents(
-            'test-subject',
-            new StreamOptions(
-                lowerBound: 'lower-bound-id',
-                includeLowerBoundEvent: true,
-                upperBound: 'upper-bound-id',
-                includeUpperBoundEvent: true
-            )
-        );
-
-        $request = $this->mockHandler->getLastRequest();
-        $requestBody = json_decode($request->getBody()->getContents(), true);
-
-        $this->assertEquals('test-subject', $requestBody['subject']);
-        $this->assertEquals('lower-bound-id', $requestBody['options']['lowerBound']);
-        $this->assertTrue($requestBody['options']['includeLowerBoundEvent']);
-        $this->assertEquals('upper-bound-id', $requestBody['options']['upperBound']);
-        $this->assertTrue($requestBody['options']['includeUpperBoundEvent']);
+        $this->respond(200, self::STORED . "\n");
+        $this->db->commit([new NewEvent('app', '/x', 't', [])]);
+        self::assertStringContainsString('"data":{}', (string) $this->lastRequest()->getBody());
     }
 
-    public function testStreamEventsWithoutOptions(): void
+    public function testCommitRejectsEmptyList(): void
     {
-        $this->mockHandler->append(
-            new Response(200, ['Content-Type' => 'application/x-ndjson'], '')
-        );
-
-        $this->client->streamEvents('test-subject');
-
-        $request = $this->mockHandler->getLastRequest();
-        $requestBody = json_decode($request->getBody()->getContents(), true);
-
-        $this->assertEquals('test-subject', $requestBody['subject']);
-        $this->assertArrayNotHasKey('options', $requestBody);
+        $this->expectException(\InvalidArgumentException::class);
+        $this->db->commit([]);
     }
 
-    public function testCommitEvents(): void
+    public function testPreconditionHelpers(): void
     {
-        $this->mockHandler->append(
-            new Response(200, ['Content-Type' => 'application/json'], '{"success": true}')
-        );
-
-        $events = [
-            new CommitEvent(
-                source: 'test-source',
-                subject: 'test-subject',
-                type: 'test.event',
-                data: ['key' => 'value']
-            )
-        ];
-
-        $this->client->commitEvents($events);
-
-        $request = $this->mockHandler->getLastRequest();
-        $requestBody = json_decode($request->getBody()->getContents(), true);
-
-        $this->assertArrayHasKey('events', $requestBody);
-        $this->assertCount(1, $requestBody['events']);
-        $this->assertEquals('test-source', $requestBody['events'][0]['source']);
-        $this->assertEquals('test-subject', $requestBody['events'][0]['subject']);
-        $this->assertEquals('test.event', $requestBody['events'][0]['type']);
-        $this->assertEquals(['key' => 'value'], $requestBody['events'][0]['data']);
+        self::assertSame(['type' => 'isSubjectExisting', 'payload' => ['subject' => '/a']], Precondition::isSubjectExisting('/a')->jsonSerialize());
+        self::assertSame(['type' => 'isQueryResultTrue', 'payload' => ['query' => 'STREAM e FROM events']], Precondition::isQueryResultTrue('STREAM e FROM events')->jsonSerialize());
     }
 
-    public function testCommitEventsWithIsSubjectNewPrecondition(): void
+    public function testPreconditionFailedIsParsed(): void
     {
-        $this->mockHandler->append(
-            new Response(200, ['Content-Type' => 'application/json'], '{"success": true}')
-        );
-
-        $events = [
-            new CommitEvent(
-                source: 'test-source',
-                subject: '/test/subject',
-                type: 'test.event.created',
-                data: ['name' => 'Test Event']
-            )
-        ];
-
-        $preconditions = [
-            Precondition::isSubjectNew('/test/subject')
-        ];
-
-        $this->client->commitEvents($events, $preconditions);
-
-        $request = $this->mockHandler->getLastRequest();
-        $requestBody = json_decode($request->getBody()->getContents(), true);
-
-        $this->assertArrayHasKey('preconditions', $requestBody);
-        $this->assertCount(1, $requestBody['preconditions']);
-        $this->assertEquals('isSubjectNew', $requestBody['preconditions'][0]['type']);
-        $this->assertEquals('/test/subject', $requestBody['preconditions'][0]['payload']['subject']);
+        $this->respond(412, '{"type":"isSubjectNew","message":"subject /customer/1 already exists"}');
+        try {
+            $this->db->commit([self::event()]);
+            self::fail('expected exception');
+        } catch (PreconditionFailedException $e) {
+            self::assertSame(412, $e->status);
+            self::assertSame('commit', $e->operation);
+            self::assertSame('isSubjectNew', $e->preconditionType);
+            self::assertSame('subject /customer/1 already exists', $e->reason);
+        }
     }
 
-    public function testCommitEventsWithIsSubjectExistingPrecondition(): void
+    public function testFetchWithAndWithoutOptions(): void
     {
-        $this->mockHandler->append(
-            new Response(200, ['Content-Type' => 'application/json'], '{"success": true}')
-        );
-
-        $events = [
-            new CommitEvent(
-                source: 'test',
-                subject: '/test/subject',
-                type: 'test.updated',
-                data: ['v' => 2]
-            )
-        ];
-
-        $preconditions = [
-            Precondition::isSubjectExisting('/test/subject')
-        ];
-
-        $this->client->commitEvents($events, $preconditions);
-
-        $request = $this->mockHandler->getLastRequest();
-        $requestBody = json_decode($request->getBody()->getContents(), true);
-
-        $this->assertArrayHasKey('preconditions', $requestBody);
-        $this->assertEquals('isSubjectExisting', $requestBody['preconditions'][0]['type']);
-        $this->assertEquals('/test/subject', $requestBody['preconditions'][0]['payload']['subject']);
+        $this->respond(200, self::STORED . "\n" . self::STORED . "\n");
+        self::assertCount(2, $this->db->fetch('/customer', new FetchOptions(lowerBound: 'x', includeLowerBoundEvent: true)));
+        self::assertSame(['subject' => '/customer', 'options' => ['lowerBound' => 'x', 'includeLowerBoundEvent' => true]], $this->lastBody());
+        $this->respond(200, '');
+        self::assertSame([], $this->db->fetch('/customer'));
+        self::assertSame(['subject' => '/customer'], $this->lastBody());
+        $this->respond(200, '');
+        $this->db->fetch('/customer', new FetchOptions());
+        self::assertSame(['subject' => '/customer'], $this->lastBody());
     }
 
-    public function testCommitEventsWithIsQueryResultTruePrecondition(): void
+    public function testQuerySubjectsTypes(): void
     {
-        $this->mockHandler->append(
-            new Response(200, ['Content-Type' => 'application/json'], '{"success": true}')
-        );
-
-        $query = "STREAM e FROM events WHERE e.subject == '/test' MAP COUNT() < 100";
-
-        $events = [
-            new CommitEvent(
-                source: 'test',
-                subject: '/test',
-                type: 'test.created',
-                data: []
-            )
-        ];
-
-        $preconditions = [
-            Precondition::isQueryResultTrue($query)
-        ];
-
-        $this->client->commitEvents($events, $preconditions);
-
-        $request = $this->mockHandler->getLastRequest();
-        $requestBody = json_decode($request->getBody()->getContents(), true);
-
-        $this->assertArrayHasKey('preconditions', $requestBody);
-        $this->assertEquals('isQueryResultTrue', $requestBody['preconditions'][0]['type']);
-        $this->assertEquals($query, $requestBody['preconditions'][0]['payload']['query']);
+        $this->respond(200, "{\"name\":\"Bruce\"}\n{\"name\":\"Selina\"}\n");
+        self::assertSame([['name' => 'Bruce'], ['name' => 'Selina']], $this->db->query('STREAM e FROM events MAP { name: e.data.name }'));
+        self::assertSame(['query' => 'STREAM e FROM events MAP { name: e.data.name }'], $this->lastBody());
+        $this->respond(200, "2\n");
+        self::assertSame([2], $this->db->query('x'));
+        $this->respond(200, "{\"subject\":\"/customer\"}\n{\"subject\":\"/order\"}\n");
+        self::assertSame(['/customer', '/order'], $this->db->subjects());
+        $this->respond(200, "{\"type\":\"customer.created\"}\n");
+        self::assertSame(['customer.created'], $this->db->types());
     }
 
-    public function testCommitEventsWithMultipleMixedPreconditions(): void
+    public function testStatus(): void
     {
-        $this->mockHandler->append(
-            new Response(200, ['Content-Type' => 'application/json'], '{"success": true}')
-        );
-
-        $events = [
-            new CommitEvent(
-                source: 'test',
-                subject: '/user/456',
-                type: 'test.user-updated',
-                data: ['name' => 'Jane']
-            )
-        ];
-
-        $preconditions = [
-            Precondition::isSubjectExisting('/user/456'),
-            Precondition::isQueryResultTrue("STREAM e FROM events WHERE e.data.email == 'john.doe@example.com' MAP COUNT() == 0"),
-        ];
-
-        $this->client->commitEvents($events, $preconditions);
-
-        $request = $this->mockHandler->getLastRequest();
-        $requestBody = json_decode($request->getBody()->getContents(), true);
-
-        $this->assertCount(2, $requestBody['preconditions']);
-        $this->assertEquals('isSubjectExisting', $requestBody['preconditions'][0]['type']);
-        $this->assertEquals('isQueryResultTrue', $requestBody['preconditions'][1]['type']);
+        $this->respond(200, '{"engine":{"version":"2.0.0","channel":"stable"},"host":{"hostname":"db"},"events":{"count":3,"subjects":1,"types":2},"storage":{"storageFormat":"v2","ready":true}}');
+        $status = $this->db->status();
+        self::assertSame('2.0.0', $status->version);
+        self::assertSame(3, $status->eventCount);
+        self::assertTrue($status->ready);
+        self::assertSame('db', $status->raw['host']['hostname']);
     }
 
-    public function testCommitEventsWithGenericPrecondition(): void
+    public function testSchemasAndAdmin(): void
     {
-        $this->mockHandler->append(
-            new Response(200, ['Content-Type' => 'application/json'], '{"success": true}')
-        );
+        $this->respond(201, '');
+        $this->db->registerSchema('customer.created', ['type' => 'object']);
+        self::assertSame(['type' => 'customer.created', 'schema' => ['type' => 'object']], $this->lastBody());
 
-        $events = [
-            new CommitEvent(
-                source: 'test',
-                subject: '/test',
-                type: 'test.created',
-                data: []
-            )
-        ];
+        $this->respond(200, "{\"type\":\"customer.created\",\"schema\":{\"type\":\"object\"}}\n");
+        $schemas = $this->db->schemas();
+        self::assertSame('customer.created', $schemas[0]->type);
+        self::assertSame(['type' => 'object'], $schemas[0]->schema);
 
-        $preconditions = [
-            Precondition::generic('someCustomFuturePrecondition', ['foo' => 'bar', 'baz' => 123])
-        ];
+        $this->respond(200, 'Audit passed');
+        self::assertSame('Audit passed', $this->db->audit());
+        self::assertSame('/api/v1/status/audit', $this->lastRequest()->getUri()->getPath());
 
-        $this->client->commitEvents($events, $preconditions);
+        $this->respond(200, 'Erased');
+        self::assertSame('Erased', $this->db->erase('/customer/1'));
+        self::assertSame(['subject' => '/customer/1'], $this->lastBody());
 
-        $request = $this->mockHandler->getLastRequest();
-        $requestBody = json_decode($request->getBody()->getContents(), true);
-
-        $this->assertEquals('someCustomFuturePrecondition', $requestBody['preconditions'][0]['type']);
-        $this->assertEquals(['foo' => 'bar', 'baz' => 123], $requestBody['preconditions'][0]['payload']);
     }
 
-    public function testCommitEventsWithoutPreconditions(): void
+    /** @return iterable<string, array{int, class-string<GenesisDBException>}> */
+    public static function errorStatuses(): iterable
     {
-        $this->mockHandler->append(
-            new Response(200, ['Content-Type' => 'application/json'], '{"success": true}')
-        );
-
-        $events = [
-            new CommitEvent(
-                source: 'test-source',
-                subject: 'test-subject',
-                type: 'test.event',
-                data: ['key' => 'value']
-            )
-        ];
-
-        $this->client->commitEvents($events);
-
-        $request = $this->mockHandler->getLastRequest();
-        $requestBody = json_decode($request->getBody()->getContents(), true);
-
-        $this->assertArrayNotHasKey('preconditions', $requestBody);
+        yield '401' => [401, AuthenticationException::class];
+        yield '403' => [403, AuthenticationException::class];
+        yield '404' => [404, NotFoundException::class];
+        yield '409' => [409, ConflictException::class];
+        yield '422' => [422, UnprocessableException::class];
+        yield '503' => [503, NotReadyException::class];
+        yield '500' => [500, GenesisDBException::class];
     }
 
-    public function testCommitEventsWithOptions(): void
+    #[DataProvider('errorStatuses')]
+    public function testErrorClasses(int $status, string $class): void
     {
-        $this->mockHandler->append(
-            new Response(200, ['Content-Type' => 'application/json'], '{"success": true}')
-        );
-
-        $events = [
-            new CommitEvent(
-                source: 'test-source',
-                subject: 'test-subject',
-                type: 'test.event',
-                data: ['key' => 'value'],
-                options: new CommitEventOptions(storeDataAsReference: true)
-            )
-        ];
-
-        $this->client->commitEvents($events);
-
-        $request = $this->mockHandler->getLastRequest();
-        $requestBody = json_decode($request->getBody()->getContents(), true);
-
-        $this->assertArrayHasKey('options', $requestBody['events'][0]);
-        $this->assertTrue($requestBody['events'][0]['options']['storeDataAsReference']);
+        $this->respond($status, 'nope');
+        try {
+            $this->db->fetch('/x');
+            self::fail('expected exception');
+        } catch (GenesisDBException $e) {
+            self::assertSame($class, $e::class);
+            self::assertSame($status, $e->status);
+            self::assertSame('nope', $e->body);
+            self::assertSame('fetch', $e->operation);
+            self::assertStringContainsString('nope', $e->getMessage());
+        }
     }
 
-    public function testEraseData(): void
+    public function testSubscribeSkipsHeartbeatAndStopsOnError(): void
     {
-        $this->mockHandler->append(
-            new Response(200, ['Content-Type' => 'application/json'], '{"success": true}')
-        );
-
-        $this->client->eraseData('test-subject');
-
-        $request = $this->mockHandler->getLastRequest();
-        $requestBody = json_decode($request->getBody()->getContents(), true);
-
-        $this->assertEquals('test-subject', $requestBody['subject']);
+        $stream = 'data: ' . self::STORED . "\n\ndata: {\"payload\":\"\"}\n\ndata: " . self::STORED . "\n\nevent: error\ndata: {\"error\":\"store closed\"}\n\n";
+        $this->respond(200, $stream);
+        $received = [];
+        try {
+            foreach ($this->db->subscribe('/customer', interval: 0.5) as $event) {
+                $received[] = $event;
+            }
+            self::fail('expected exception');
+        } catch (GenesisDBException $e) {
+            self::assertStringContainsString('store closed', $e->getMessage());
+        }
+        self::assertCount(2, $received);
+        self::assertSame(['subject' => '/customer', 'interval' => 0.5], $this->lastBody());
     }
 
-    public function testAudit(): void
+    public function testSubscribeThrowsOnHttpError(): void
     {
-        $auditResponse = 'Audit log content';
-        $this->mockHandler->append(
-            new Response(200, ['Content-Type' => 'text/plain'], $auditResponse)
-        );
-
-        $result = $this->client->audit();
-
-        $this->assertEquals($auditResponse, $result);
-    }
-
-    public function testPing(): void
-    {
-        $pingResponse = 'pong';
-        $this->mockHandler->append(
-            new Response(200, ['Content-Type' => 'text/plain'], $pingResponse)
-        );
-
-        $result = $this->client->ping();
-
-        $this->assertEquals($pingResponse, $result);
-    }
-
-    public function testQueryMethod(): void
-    {
-        $queryResult = json_encode(['result' => 'data']);
-        $this->mockHandler->append(
-            new Response(200, ['Content-Type' => 'application/x-ndjson'], $queryResult)
-        );
-
-        $results = $this->client->q('SELECT * FROM events');
-
-        $this->assertCount(1, $results);
-        $this->assertEquals('data', $results[0]['result']);
-
-        $request = $this->mockHandler->getLastRequest();
-        $requestBody = json_decode($request->getBody()->getContents(), true);
-        $this->assertEquals('SELECT * FROM events', $requestBody['query']);
-    }
-
-    public function testQueryEventsMethod(): void
-    {
-        $queryResult = json_encode(['event' => 'data']);
-        $this->mockHandler->append(
-            new Response(200, ['Content-Type' => 'application/x-ndjson'], $queryResult)
-        );
-
-        $results = $this->client->queryEvents('SELECT * FROM events WHERE type = "test"');
-
-        $this->assertCount(1, $results);
-        $this->assertEquals('data', $results[0]['event']);
-
-        $request = $this->mockHandler->getLastRequest();
-        $requestBody = json_decode($request->getBody()->getContents(), true);
-        $this->assertEquals('SELECT * FROM events WHERE type = "test"', $requestBody['query']);
-    }
-
-    public function testStreamEventsHandlesMultipleEvents(): void
-    {
-        $event1 = json_encode([
-            'id' => 'event-1',
-            'source' => 'test-source',
-            'type' => 'test.event',
-            'data' => ['key' => 'value1'],
-            'subject' => 'test-subject',
-            'time' => '2023-01-01T00:00:00Z'
-        ]);
-
-        $event2 = json_encode([
-            'id' => 'event-2',
-            'source' => 'test-source',
-            'type' => 'test.event',
-            'data' => ['key' => 'value2'],
-            'subject' => 'test-subject',
-            'time' => '2023-01-01T01:00:00Z'
-        ]);
-
-        $responseBody = $event1 . "\n" . $event2;
-
-        $this->mockHandler->append(
-            new Response(200, ['Content-Type' => 'application/x-ndjson'], $responseBody)
-        );
-
-        $events = $this->client->streamEvents('test-subject');
-
-        $this->assertCount(2, $events);
-        $this->assertEquals('event-1', $events[0]->getId());
-        $this->assertEquals('event-2', $events[1]->getId());
-    }
-
-    public function testObserveEventsWithOptions(): void
-    {
-        $eventJson = json_encode([
-            'id' => 'event-1',
-            'source' => 'test-source',
-            'type' => 'test.event',
-            'data' => ['key' => 'value'],
-            'subject' => 'test-subject',
-            'time' => '2023-01-01T00:00:00Z'
-        ]);
-
-        $this->mockHandler->append(
-            new Response(200, ['Content-Type' => 'application/x-ndjson'], $eventJson . "\n")
-        );
-
-        $generator = $this->client->observeEvents(
-            'test-subject',
-            new StreamOptions(
-                lowerBound: '123',
-                includeLowerBoundEvent: true
-            )
-        );
-
-        $events = iterator_to_array($generator);
-
-        $request = $this->mockHandler->getLastRequest();
-        $requestBody = json_decode($request->getBody()->getContents(), true);
-
-        $this->assertEquals('test-subject', $requestBody['subject']);
-        $this->assertEquals('123', $requestBody['options']['lowerBound']);
-        $this->assertTrue($requestBody['options']['includeLowerBoundEvent']);
-    }
-
-    public function testObserveEventsWithUpperBound(): void
-    {
-        $this->mockHandler->append(
-            new Response(200, ['Content-Type' => 'application/x-ndjson'], '')
-        );
-
-        $generator = $this->client->observeEvents(
-            'test-subject',
-            new StreamOptions(
-                lowerBound: '123',
-                includeLowerBoundEvent: true,
-                upperBound: '456',
-                includeUpperBoundEvent: false
-            )
-        );
-
-        iterator_to_array($generator);
-
-        $request = $this->mockHandler->getLastRequest();
-        $requestBody = json_decode($request->getBody()->getContents(), true);
-
-        $this->assertEquals('123', $requestBody['options']['lowerBound']);
-        $this->assertTrue($requestBody['options']['includeLowerBoundEvent']);
-        $this->assertEquals('456', $requestBody['options']['upperBound']);
-        $this->assertFalse($requestBody['options']['includeUpperBoundEvent']);
-    }
-
-    public function testObserveEventsWithoutOptions(): void
-    {
-        $this->mockHandler->append(
-            new Response(200, ['Content-Type' => 'application/x-ndjson'], '')
-        );
-
-        $generator = $this->client->observeEvents('test-subject');
-        iterator_to_array($generator);
-
-        $request = $this->mockHandler->getLastRequest();
-        $requestBody = json_decode($request->getBody()->getContents(), true);
-
-        $this->assertEquals('test-subject', $requestBody['subject']);
-        $this->assertArrayNotHasKey('options', $requestBody);
-    }
-
-    // --- StreamOptions unit tests ---
-
-    public function testStreamOptionsToArrayOmitsNulls(): void
-    {
-        $options = new StreamOptions();
-        $this->assertEquals([], $options->toArray());
-    }
-
-    public function testStreamOptionsToArrayIncludesSetValues(): void
-    {
-        $options = new StreamOptions(
-            lowerBound: 'lb',
-            includeLowerBoundEvent: true,
-            upperBound: 'ub',
-            includeUpperBoundEvent: false,
-            latestByEventType: 'some.type'
-        );
-
-        $this->assertEquals([
-            'lowerBound' => 'lb',
-            'includeLowerBoundEvent' => true,
-            'upperBound' => 'ub',
-            'includeUpperBoundEvent' => false,
-            'latestByEventType' => 'some.type',
-        ], $options->toArray());
-    }
-
-    // --- CommitEvent unit tests ---
-
-    public function testCommitEventToArray(): void
-    {
-        $event = new CommitEvent(
-            source: 'io.genesisdb.app',
-            subject: '/customer',
-            type: 'io.genesisdb.app.customer-added',
-            data: ['firstName' => 'Bruce']
-        );
-
-        $this->assertEquals([
-            'source' => 'io.genesisdb.app',
-            'subject' => '/customer',
-            'type' => 'io.genesisdb.app.customer-added',
-            'data' => ['firstName' => 'Bruce'],
-        ], $event->toArray());
-    }
-
-    public function testCommitEventToArrayWithOptions(): void
-    {
-        $event = new CommitEvent(
-            source: 'io.genesisdb.app',
-            subject: '/customer',
-            type: 'io.genesisdb.app.customer-added',
-            data: ['firstName' => 'Bruce'],
-            options: new CommitEventOptions(storeDataAsReference: true)
-        );
-
-        $array = $event->toArray();
-        $this->assertArrayHasKey('options', $array);
-        $this->assertTrue($array['options']['storeDataAsReference']);
-    }
-
-    // --- Precondition unit tests ---
-
-    public function testPreconditionIsSubjectNew(): void
-    {
-        $p = Precondition::isSubjectNew('/user/123');
-
-        $this->assertEquals('isSubjectNew', $p->type);
-        $this->assertEquals(['subject' => '/user/123'], $p->payload);
-        $this->assertEquals([
-            'type' => 'isSubjectNew',
-            'payload' => ['subject' => '/user/123'],
-        ], $p->toArray());
-    }
-
-    public function testPreconditionIsSubjectExisting(): void
-    {
-        $p = Precondition::isSubjectExisting('/user/123');
-
-        $this->assertEquals('isSubjectExisting', $p->type);
-        $this->assertEquals(['subject' => '/user/123'], $p->payload);
-        $this->assertEquals([
-            'type' => 'isSubjectExisting',
-            'payload' => ['subject' => '/user/123'],
-        ], $p->toArray());
-    }
-
-    public function testPreconditionIsQueryResultTrue(): void
-    {
-        $query = "STREAM e FROM events WHERE e.data.email == 'test@example.com' MAP COUNT() == 0";
-        $p = Precondition::isQueryResultTrue($query);
-
-        $this->assertEquals('isQueryResultTrue', $p->type);
-        $this->assertEquals(['query' => $query], $p->payload);
-        $this->assertEquals([
-            'type' => 'isQueryResultTrue',
-            'payload' => ['query' => $query],
-        ], $p->toArray());
-    }
-
-    public function testPreconditionGeneric(): void
-    {
-        $p = Precondition::generic('customType', ['foo' => 'bar']);
-
-        $this->assertEquals('customType', $p->type);
-        $this->assertEquals(['foo' => 'bar'], $p->payload);
-        $this->assertEquals([
-            'type' => 'customType',
-            'payload' => ['foo' => 'bar'],
-        ], $p->toArray());
+        $this->respond(401, 'denied');
+        $this->expectException(AuthenticationException::class);
+        foreach ($this->db->subscribe('/customer') as $event) {
+            self::fail('no event expected');
+        }
     }
 }
