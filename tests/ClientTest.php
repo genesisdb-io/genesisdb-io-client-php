@@ -77,7 +77,7 @@ final class ClientTest extends TestCase
         $this->respond(200, 'Pong');
         self::assertSame('Pong', $this->db->ping());
         $request = $this->lastRequest();
-        self::assertSame('http://db.test/ping', (string) $request->getUri());
+        self::assertSame('http://db.test/api/v2/ping', (string) $request->getUri());
         self::assertSame('Bearer secret', $request->getHeaderLine('Authorization'));
         self::assertSame('genesisdb-php/2', $request->getHeaderLine('User-Agent'));
     }
@@ -86,7 +86,7 @@ final class ClientTest extends TestCase
     {
         $this->respond(200, self::STORED . "\n");
         $events = $this->db->commit([self::event()], [Precondition::isSubjectNew('/customer/1')]);
-        self::assertSame('/api/v1/commit', $this->lastRequest()->getUri()->getPath());
+        self::assertSame('/api/v2/commit', $this->lastRequest()->getUri()->getPath());
         self::assertSame([
             'events' => [['source' => 'app', 'subject' => '/customer/1', 'type' => 'customer.created', 'data' => ['name' => 'Bruce']]],
             'preconditions' => [['type' => 'isSubjectNew', 'payload' => ['subject' => '/customer/1']]],
@@ -189,7 +189,7 @@ final class ClientTest extends TestCase
 
         $this->respond(200, 'Audit passed');
         self::assertSame('Audit passed', $this->db->audit());
-        self::assertSame('/api/v1/status/audit', $this->lastRequest()->getUri()->getPath());
+        self::assertSame('/api/v2/admin/audit', $this->lastRequest()->getUri()->getPath());
 
         $this->respond(200, 'Erased');
         self::assertSame('Erased', $this->db->erase('/customer/1'));

@@ -56,19 +56,19 @@ final class Client
     /** Liveness check. Needs no token on the server. Returns "Pong". */
     public function ping(): string
     {
-        return $this->text('ping', 'GET', '/ping');
+        return $this->text('ping', 'GET', '/api/v2/ping');
     }
 
     /** Engine version, host, event counts, storage format and readiness. */
     public function status(): Status
     {
-        return Status::fromArray($this->json('status', 'GET', '/api/v1/status'));
+        return Status::fromArray($this->json('status', 'GET', '/api/v2/status'));
     }
 
     /** Verify the hash chain of the whole store. Administrator token. Returns the audit text. */
     public function audit(): string
     {
-        return $this->text('audit', 'GET', '/api/v1/status/audit');
+        return $this->text('audit', 'GET', '/api/v2/admin/audit');
     }
 
     // Events
@@ -90,7 +90,7 @@ final class Client
         if ($preconditions !== []) {
             $body['preconditions'] = array_values($preconditions);
         }
-        return array_map(Event::fromArray(...), $this->ndjson('commit', 'POST', '/api/v1/commit', $body));
+        return array_map(Event::fromArray(...), $this->ndjson('commit', 'POST', '/api/v2/commit', $body));
     }
 
     /**
@@ -100,7 +100,7 @@ final class Client
      */
     public function fetch(string $subject, ?FetchOptions $options = null): array
     {
-        return array_map(Event::fromArray(...), $this->ndjson('fetch', 'POST', '/api/v1/fetch', self::fetchBody($subject, $options)));
+        return array_map(Event::fromArray(...), $this->ndjson('fetch', 'POST', '/api/v2/fetch', self::fetchBody($subject, $options)));
     }
 
     /**
@@ -117,7 +117,7 @@ final class Client
         if ($interval !== null) {
             $body['interval'] = $interval;
         }
-        $response = $this->send('subscribe', 'POST', '/api/v1/subscribe', $body, [RequestOptions::STREAM => true, RequestOptions::TIMEOUT => 0, RequestOptions::READ_TIMEOUT => 0]);
+        $response = $this->send('subscribe', 'POST', '/api/v2/subscribe', $body, [RequestOptions::STREAM => true, RequestOptions::TIMEOUT => 0, RequestOptions::READ_TIMEOUT => 0]);
         $stream = $response->getBody();
         if ($response->getStatusCode() !== 200) {
             throw GenesisDBException::forResponse('subscribe', $response->getStatusCode(), (string) $stream);
@@ -156,7 +156,7 @@ final class Client
      */
     public function query(string $query): array
     {
-        return $this->ndjson('query', 'POST', '/api/v1/query', ['query' => $query]);
+        return $this->ndjson('query', 'POST', '/api/v2/query', ['query' => $query]);
     }
 
     /**
@@ -166,7 +166,7 @@ final class Client
      */
     public function subjects(): array
     {
-        return array_map(fn (array $row) => (string) $row['subject'], $this->ndjson('subjects', 'GET', '/api/v1/subjects'));
+        return array_map(fn (array $row) => (string) $row['subject'], $this->ndjson('subjects', 'GET', '/api/v2/subjects'));
     }
 
     /**
@@ -176,7 +176,7 @@ final class Client
      */
     public function types(): array
     {
-        return array_map(fn (array $row) => (string) $row['type'], $this->ndjson('types', 'GET', '/api/v1/types'));
+        return array_map(fn (array $row) => (string) $row['type'], $this->ndjson('types', 'GET', '/api/v2/types'));
     }
 
     // Schemas
@@ -188,7 +188,7 @@ final class Client
      */
     public function registerSchema(string $eventType, array $schema): void
     {
-        $this->send('register_schema', 'POST', '/api/v1/schemas', ['type' => $eventType, 'schema' => $schema === [] ? new \stdClass() : $schema]);
+        $this->send('register_schema', 'POST', '/api/v2/schemas', ['type' => $eventType, 'schema' => $schema === [] ? new \stdClass() : $schema]);
     }
 
     /**
@@ -198,7 +198,7 @@ final class Client
      */
     public function schemas(): array
     {
-        return array_map(fn (array $row) => new RegisteredSchema((string) $row['type'], (array) $row['schema']), $this->ndjson('schemas', 'GET', '/api/v1/schemas'));
+        return array_map(fn (array $row) => new RegisteredSchema((string) $row['type'], (array) $row['schema']), $this->ndjson('schemas', 'GET', '/api/v2/schemas'));
     }
 
     // Administration
@@ -210,7 +210,7 @@ final class Client
      */
     public function erase(string $subject): string
     {
-        return $this->text('erase', 'POST', '/api/v1/erase', ['subject' => $subject]);
+        return $this->text('erase', 'POST', '/api/v2/admin/erase', ['subject' => $subject]);
     }
 
     // Transport

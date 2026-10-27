@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace GenesisDB;
 
-/** The body of GET /api/v1/status. */
+/** The body of GET /api/v2/status. */
 final class Status
 {
     /**
