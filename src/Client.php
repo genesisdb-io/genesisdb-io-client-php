@@ -117,7 +117,7 @@ final class Client
         if ($interval !== null) {
             $body['interval'] = $interval;
         }
-        $response = $this->send('subscribe', 'POST', '/api/v2/subscribe', $body, [RequestOptions::STREAM => true, RequestOptions::TIMEOUT => 0, RequestOptions::READ_TIMEOUT => 0]);
+        $response = $this->send('subscribe', 'POST', '/api/v2/subscribe', $body, [RequestOptions::STREAM => true, RequestOptions::TIMEOUT => 0]);
         $stream = $response->getBody();
         if ($response->getStatusCode() !== 200) {
             throw GenesisDBException::forResponse('subscribe', $response->getStatusCode(), (string) $stream);
@@ -292,9 +292,25 @@ final class Client
         return is_array($decoded) ? $decoded : ['value' => $decoded];
     }
 
-    /** @return \Generator<int, string> */
+    /**
+     * Splits a stream into lines as soon as they arrive.
+     *
+     * A network stream is switched to non-blocking reads and polled with short pauses. A blocking fread waits until
+     * the whole buffer is full, so a short heartbeat would never be delivered, and a read timeout of 0 makes PHP 8.2
+     * fail every read. stream_select is not usable here, the HTTP stream wrapper does not support it. Other
+     * streams, such as the in-memory bodies of tests, are read as before.
+     *
+     * @return \Generator<int, string>
+     */
     private static function lines(StreamInterface $stream): \Generator
     {
+        $socket = $stream->getMetadata('stream_type') !== null && str_contains((string) $stream->getMetadata('stream_type'), 'socket')
+            ? $stream->detach()
+            : null;
+        if (is_resource($socket)) {
+            yield from self::socketLines($socket);
+            return;
+        }
         $buffer = '';
         while (!$stream->eof()) {
             $chunk = $stream->read(8192);
@@ -313,6 +329,41 @@ final class Client
         }
         if ($buffer !== '') {
             yield rtrim($buffer, "\r");
+        }
+    }
+
+    /**
+     * @param resource $socket
+     * @return \Generator<int, string>
+     */
+    private static function socketLines($socket): \Generator
+    {
+        stream_set_blocking($socket, false);
+        $buffer = '';
+        try {
+            while (true) {
+                $chunk = fread($socket, 8192);
+                if ($chunk === false) {
+                    break;
+                }
+                if ($chunk === '') {
+                    if (feof($socket)) {
+                        break;
+                    }
+                    usleep(10_000);
+                    continue;
+                }
+                $buffer .= $chunk;
+                while (($newline = strpos($buffer, "\n")) !== false) {
+                    yield rtrim(substr($buffer, 0, $newline), "\r");
+                    $buffer = substr($buffer, $newline + 1);
+                }
+            }
+            if ($buffer !== '') {
+                yield rtrim($buffer, "\r");
+            }
+        } finally {
+            fclose($socket);
         }
     }
 }
